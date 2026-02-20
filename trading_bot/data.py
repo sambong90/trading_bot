@@ -5,13 +5,88 @@ from trading_bot.db import get_session
 from trading_bot.models import OHLCV
 
 
-def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200):
-    """Fetch OHLCV from Upbit and return DataFrame with columns time, open, high, low, close, volume"""
+def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backoff=1):
+    """Fetch OHLCV from Upbit and return DataFrame with columns time, open, high, low, close, volume
+    Implements simple retry with exponential backoff and cache fallback (trading_bot/logs/cache).
+    """
+    import time, os, json
+    cache_dir = os.path.join('trading_bot','logs','cache')
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"{ticker}_{interval}_{count}.json")
+
     update_phase('A - 데이터 수집', status='in_progress', percent=10, recent_actions=[f'fetch start {ticker} {interval}'], next_steps=['데이터 정합성 검사'])
-    df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
-    if df is None:
-        update_phase('A - 데이터 수집', status='failed', percent=0, issues=['pyupbit returned no data'])
-        raise RuntimeError('No data returned from pyupbit')
+    df = None
+    last_exc = None
+    for attempt in range(1, retry+1):
+        try:
+            df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
+            if df is not None and len(df):
+                break
+            last_exc = RuntimeError('No data returned from pyupbit')
+        except Exception as e:
+            last_exc = e
+        time.sleep(backoff * (2 ** (attempt-1)))
+
+    if df is None or len(df)==0:
+        # increment failure counter
+        try:
+            fc_path = os.path.join('trading_bot','logs','fail_count.json')
+            fc = {'count':0}
+            if os.path.exists(fc_path):
+                try:
+                    with open(fc_path,'r',encoding='utf-8') as f:
+                        fc = json.load(f)
+                except Exception:
+                    fc = {'count':0}
+            fc['count'] = fc.get('count',0) + 1
+            with open(fc_path,'w',encoding='utf-8') as f:
+                json.dump(fc,f)
+            # if >=3, send telegram alert (best-effort)
+            if fc['count'] >= 3:
+                try:
+                    from trading_bot.monitor import send_telegram
+                    send_telegram(f"[Alert] pyupbit returned no data {fc['count']} times in a row on host")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # try cache fallback (only accept cache younger than 12 hours)
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file,'r',encoding='utf-8') as f:
+                    cached = json.load(f)
+                # build DataFrame
+                df = pd.DataFrame(cached)
+                # convert time if needed
+                if 'time' in df.columns:
+                    df['time'] = pd.to_datetime(df['time'])
+                # check cache freshness
+                try:
+                    max_ts = df['time'].max()
+                    if pd.Timestamp.now(tz=max_ts.tz) - max_ts > pd.Timedelta(hours=12):
+                        raise RuntimeError('cache too old')
+                except Exception:
+                    update_phase('A - 데이터 수집', status='failed', percent=0, issues=['pyupbit returned no data', 'cache too old'])
+                    raise last_exc if last_exc else RuntimeError('No data and cache too old')
+                update_phase('A - 데이터 수집', status='done', percent=50, recent_actions=[f'fetch used cache {cache_file}'])
+            except Exception:
+                update_phase('A - 데이터 수집', status='failed', percent=0, issues=['pyupbit returned no data', 'cache read failed'])
+                raise last_exc if last_exc else RuntimeError('No data and cache read failed')
+        else:
+            update_phase('A - 데이터 수집', status='failed', percent=0, issues=['pyupbit returned no data'])
+            raise last_exc if last_exc else RuntimeError('No data returned from pyupbit')
+    else:
+        # save cache
+        try:
+            out = df.reset_index().rename(columns={'index':'time'})
+            # serialize time as ISO
+            out['time'] = out['time'].astype(str)
+            with open(cache_file,'w',encoding='utf-8') as f:
+                json.dump(out.to_dict(orient='records'), f, ensure_ascii=False)
+        except Exception:
+            pass
+
     df = df.reset_index().rename(columns={'index':'time'})
     # ensure timezone-aware (Upbit returns KST index)
     if not pd.api.types.is_datetime64_any_dtype(df['time']):
