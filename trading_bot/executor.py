@@ -77,6 +77,22 @@ class PaperExecutor:
             update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'sell executed price={price}'], stages=self.stages)
 
 class LiveExecutor:
+    ENABLE_AUTO_LIVE = None  # populated from env at init
+
+    def _load_env_flags(self):
+        import os
+        self.ENABLE_AUTO_LIVE = os.environ.get('ENABLE_AUTO_LIVE') == '1'
+        try:
+            self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', '50000'))
+        except Exception:
+            self.MAX_DAILY_LOSS_KRW = 50000.0
+        try:
+            self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', '0.1'))
+        except Exception:
+            self.MAX_POSITION_PCT = 0.1
+        self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS','false').lower() in ('1','true','yes')
+
+:
     def __init__(self, access_key=None, secret_key=None):
         # real implementation: requires UPBIT_ACCESS_KEY & UPBIT_SECRET_KEY in env
         import os
@@ -91,6 +107,21 @@ class LiveExecutor:
                 self.enabled = True
             except Exception as e:
                 print('LiveExecutor init failed:', e)
+
+    def _persist_order(self, rec, status='submitted'):
+        # persist live order to DB and log for auditing
+        try:
+            from trading_bot.db import get_session
+            from trading_bot.models import Order
+            import pandas as pd
+            session = get_session()
+            # create Order record if model available
+            o = Order(order_id=str(rec.get('order_id') or int(pd.Timestamp.now().timestamp()*1000)), ts=pd.to_datetime(rec.get('time')).to_pydatetime(), side=rec.get('side'), price=rec.get('price'), qty=rec.get('qty') or 0.0, status=status, fee=0.0, raw=rec)
+            session.add(o)
+            session.commit()
+            session.close()
+        except Exception as e:
+            print('Failed to persist live order:', e)
 
     def place_order(self, side, price, size_pct=1.0):
         import os, pandas as pd
@@ -108,18 +139,50 @@ class LiveExecutor:
             for attempt in range(1, max_retries+1):
                 try:
                     if side == 'buy':
-                        krw_bal = float(self.client.get_balances()[0]['balance'])
+                        # find KRW balance from balances dict
+                        bal_list = self.client.get_balances()
+                        krw_bal = 0.0
+                        for b in bal_list:
+                            if b.get('currency') == 'KRW':
+                                krw_bal = float(b.get('balance') or 0)
+                                break
                         spend = krw_bal * size_pct
-                        resp = self.client.buy_limit_order('KRW-BTC', price, spend)
+                        ticker = 'KRW-AXS'
+                        # ensure spend respects exchange min_total
+                        try:
+                            import requests
+                            r = requests.get(f'https://api.upbit.com/v1/orders/chance?market={ticker}', timeout=5)
+                            data = r.json()
+                            min_total = float(data.get('market', {}).get('bid', {}).get('min_total') or data.get('market', {}).get('ask', {}).get('min_total') or 1000)
+                        except Exception:
+                            # if chance endpoint requires auth, fall back to conservative default
+                            min_total = 5000
+                        if spend < min_total:
+                            spend = min_total
+                        # buy_limit_order expects volume (qty), not spend — compute qty = spend / price
+                        qty = spend / price if price else 0
+                        resp = self.client.buy_limit_order(ticker, price, qty)
                     else:
-                        resp = self.client.sell_market_order('KRW-BTC', size_pct)
+                        ticker = 'KRW-AXS'
+                        # for sell, we need the asset balance
+                        bal_list = self.client.get_balances()
+                        asset_bal = 0.0
+                        for b in bal_list:
+                            if b.get('currency') == ticker.split('-')[1]:
+                                asset_bal = float(b.get('balance') or 0)
+                                break
+                        sell_qty = asset_bal * size_pct if size_pct <= 1 else size_pct
+                        resp = self.client.sell_market_order(ticker, sell_qty)
                     # parse response: pyupbit returns dict with 'uuid' or similar
                     order_id = None
                     if isinstance(resp, dict):
                         order_id = resp.get('uuid') or resp.get('id') or resp.get('uuid')
                     rec = {'time': pd.Timestamp.now().isoformat(), 'side': side, 'price': price, 'qty': spend if side=='buy' else resp}
                     # persist order with order_id if available
-                    self._persist_order({**rec, 'order_id': order_id}, status='submitted')
+                    try:
+                        self._persist_order({**rec, 'order_id': order_id}, status='submitted')
+                    except Exception:
+                        pass
                     return resp
                 except Exception as e:
                     print(f'Live order attempt {attempt} failed:', e)
@@ -131,3 +194,11 @@ class LiveExecutor:
         except Exception as e:
             print('Live order failed:', e)
             raise
+
+    def _notify_telegram(self, text):
+        try:
+            from trading_bot.monitor import send_telegram
+            if getattr(self,'TELEGRAM_ALERTS',False):
+                send_telegram(text)
+        except Exception:
+            pass

@@ -1,3 +1,36 @@
+
+from flask import Flask, request, jsonify
+import os
+app = Flask(__name__)
+
+@app.route('/panic', methods=['POST'])
+def panic():
+    try:
+        # disable auto live immediately
+        import dotenv, os
+        dotenv_path='trading_bot/.env'
+        # update env file (simple append toggle)
+        with open(dotenv_path,'r') as f:
+            lines=f.readlines()
+        new=[]
+        found=False
+        for L in lines:
+            if L.startswith('ENABLE_AUTO_LIVE='):
+                new.append('ENABLE_AUTO_LIVE=0
+')
+                found=True
+            else:
+                new.append(L)
+        if not found:
+            new.append('ENABLE_AUTO_LIVE=0
+')
+        with open(dotenv_path,'w') as f:
+            f.writelines(new)
+        return jsonify({'ok':True,'msg':'AUTO LIVE disabled'})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)})
+
+
 import os
 from trading_bot.data import fetch_ohlcv
 from trading_bot.strategy import generate_sma_signals
