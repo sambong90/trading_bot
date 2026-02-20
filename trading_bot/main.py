@@ -166,7 +166,46 @@ def api_price_ohlcv():
         for c in ['open','high','low','close','volume']:
             if c in df.columns:
                 df[c] = df[c].astype(float)
+        # Ensure ts is an epoch second (if ts is datetime-like in index or column)
+        if 'ts' not in df.columns:
+            # try using index
+            try:
+                idx = df.index
+                if hasattr(idx, 'to_pydatetime'):
+                    df = df.reset_index()
+                    df = df.rename(columns={'index':'ts'})
+            except Exception:
+                pass
+        # convert ts to epoch seconds when possible
+        def to_epoch(v):
+            try:
+                if isinstance(v, (int, float)):
+                    # if small index like 0..N, treat as missing (return None)
+                    if v < 1000000000:
+                        return None
+                    return int(v)
+                import pandas as pd
+                if pd.api.types.is_datetime64_any_dtype(type(v)):
+                    return int(pd.to_datetime(v).timestamp())
+                # try parse
+                t = pd.to_datetime(v)
+                return int(t.timestamp())
+            except Exception:
+                return None
+        df['ts'] = df['ts'].apply(to_epoch)
+        # if ts still None, try to reconstruct from index if datetime
+        if df['ts'].isnull().all():
+            try:
+                idx = df.index
+                if hasattr(idx, 'to_pydatetime'):
+                    df = df.reset_index()
+                    df = df.rename(columns={'index':'ts'})
+                    df['ts'] = df['ts'].apply(lambda v: int(pd.to_datetime(v).timestamp()) if not pd.isnull(v) else None)
+            except Exception:
+                pass
         ohlcv = df[['ts','open','high','low','close','volume']].to_dict(orient='records')
+        # filter out records without ts
+        ohlcv = [r for r in ohlcv if r.get('ts') is not None]
         out = {'ticker':ticker,'interval':interval,'ohlcv':ohlcv}
         with open(cache_file,'w') as f:
             json.dump(out, f, default=str)
