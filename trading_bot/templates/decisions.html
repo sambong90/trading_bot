@@ -81,22 +81,5 @@
     }).mount('#app')
   </script>
 {% endraw %}
-  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-  <script>
-    const { createApp } = Vue
-    createApp({
-      data(){return {decisions:[], selected:null}},
-      methods:{
-        refresh(){
-          fetch('/api/decisions').then(r=>r.json()).then(d=>{this.decisions=d.decisions||[]})
-        },
-        select(d){this.selected=d},
-        formatKRW(v){if(!v&&v!==0) return ''; return new Intl.NumberFormat('ko-KR').format(v)+'₩'},
-        formatTime(t){if(!t) return ''; try{const dt=new Date(t); return dt.toLocaleString('ko-KR')}catch(e){return t}},
-        signalLabel(s){ if(s==1) return '매수'; if(s==-1) return '매도'; return '보류'}
-      },
-      mounted(){this.refresh()}
-    }).mount('#app')
-  </script>
 </body>
 </html>
