@@ -2,43 +2,46 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dashboard - Trading Bot</title>
   <link rel="stylesheet" href="/static/style.css">
-  <style>
-    .row{display:flex;gap:12px}
-    .col{flex:1}
-    .nav{margin-bottom:12px}
-    .search{display:flex;gap:8px}
-  </style>
 </head>
 <body>
   <div class="container">
     <div class="nav card">
-      <button class="btn" onclick="location.href='/'">메인</button>
-      <button class="btn" onclick="location.href='/decisions'">Decisions</button>
-      <button class="btn" onclick="location.href='/account'">Account</button>
-      <button class="btn" onclick="location.href='/account'">Orders</button>
-      <button class="btn" onclick="location.href='/status'">Status</button>
+      <button class="btn" onclick="location.href='/'">📊 메인</button>
+      <button class="btn" onclick="location.href='/decisions'">📈 Decisions</button>
+      <button class="btn" onclick="location.href='/account'">💰 Account</button>
+      <button class="btn" onclick="location.href='/logs'">📝 Logs</button>
+      <button class="btn btn-secondary" onclick="location.href='/status'">⚙️ Status</button>
     </div>
 
-    <h1>메인 대시보드</h1>
+    <h1>🚀 트레이딩 봇 대시보드</h1>
+    
     <div class="row">
       <div class="col card">
-        <h3>BTC (KRW-BTC)</h3>
-        <div id="chart-btc" style="height:320px"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <h3 style="margin: 0;">₿ BTC (KRW-BTC)</h3>
+          <span class="badge badge-info">실시간</span>
+        </div>
+        <div id="chart-btc" style="height:400px; border-radius: 0.5rem; overflow: hidden;"></div>
       </div>
       <div class="col card">
-        <h3>ETH (KRW-ETH)</h3>
-        <div id="chart-eth" style="height:320px"></div>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <h3 style="margin: 0;">Ξ ETH (KRW-ETH)</h3>
+          <span class="badge badge-info">실시간</span>
+        </div>
+        <div id="chart-eth" style="height:400px; border-radius: 0.5rem; overflow: hidden;"></div>
       </div>
     </div>
 
-    <div class="card" style="margin-top:12px">
+    <div class="card">
+      <h3>🔍 코인 검색</h3>
       <div class="search">
-        <input id="symbol" placeholder="KRW-ATOM" />
+        <input id="symbol" placeholder="예: KRW-ATOM, KRW-SOL, KRW-XRP" style="flex: 1;" />
         <button class="btn" id="btnSearch">조회</button>
       </div>
-      <div id="chart-symbol" style="height:320px;margin-top:8px"></div>
+      <div id="chart-symbol" style="height:400px; margin-top: 1rem; border-radius: 0.5rem; overflow: hidden;"></div>
     </div>
   </div>
 
@@ -86,21 +89,62 @@
           const d = new Date(timestamp*1000)
           return d.toLocaleString('ko-KR', {year:'numeric',month:'2-digit',day:'2-digit', hour:'2-digit', minute:'2-digit'})
         }
-        const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height: 320, layout:{background:'#ffffff', textColor:'#000'}, priceScale:{borderVisible:false, mode: 1}})
-        const candleSeries = chart.addCandlestickSeries()
+        const chart = LightweightCharts.createChart(container, {
+          width: container.clientWidth, 
+          height: 400, 
+          layout:{
+            background: { type: 'solid', color: '#1e293b' },
+            textColor: '#cbd5e1'
+          }, 
+          grid: {
+            vertLines: { color: '#334155' },
+            horzLines: { color: '#334155' }
+          },
+          priceScale:{borderVisible:false, mode: 1},
+          timeScale: {
+            borderColor: '#334155',
+            timeVisible: true,
+            secondsVisible: false
+          }
+        })
+        const candleSeries = chart.addCandlestickSeries({
+          upColor: '#10b981',
+          downColor: '#ef4444',
+          borderVisible: false,
+          wickUpColor: '#10b981',
+          wickDownColor: '#ef4444'
+        })
         candleSeries.setData(candles)
         // add volume as histogram (separate scale)
-        const volumeSeries = chart.addHistogramSeries({priceScaleId: '', scaleMargins: {top: 0.8, bottom: 0}, color: '#26a69a'})
+        const volumeSeries = chart.addHistogramSeries({
+          priceScaleId: '', 
+          scaleMargins: {top: 0.8, bottom: 0}, 
+          color: '#6366f1',
+          lineWidth: 1,
+          priceFormat: {
+            type: 'volume',
+          },
+          overlay: true,
+          scaleMargins: {
+            top: 0.8,
+            bottom: 0,
+          },
+        })
         volumeSeries.setData(volumes)
         // compute EMA(20)
         const closes = candles.map(c=>c.close)
         const ema = computeEMA(closes, 20)
         const emaData = candles.map((c,i)=>({time:c.time, value: ema[i]}))
-        chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
+        chart.addLineSeries({
+          color: '#f59e0b', 
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: true
+        }).setData(emaData)
         // axis formatters
-        chart.timeScale().applyOptions({timeVisible:true, rightOffset:2, fixLeftEdge:false})
+        chart.timeScale().applyOptions({timeVisible:true, rightOffset:2, fixLeftEdge:false, secondsVisible:true})
         chart.applyOptions({
-          localization: {dateFormat: 'yyyy-MM-dd'},
+          localization: {dateFormat: 'yyyy-MM-dd HH:mm:ss'},
           layout:{},
         })
         // customize price axis labels
@@ -119,22 +163,42 @@
     function attachIntervalButtons(containerPrefix, chartIdPrefix, defaultTicker){
       const container = document.getElementById(containerPrefix)
       if(!container) return
-      const btns = document.createElement('div')
-      btns.style.marginBottom='8px'
-      defaultIntervals.forEach(iv=>{
-        const b=document.createElement('button')
-        b.className='btn'
-        b.style.marginRight='6px'
-        b.textContent = iv.replace('minute','').replace('day','1D').replace('week','1W').replace('month','1M')
-        b.onclick = ()=>{ loadLightweightChart(defaultTicker, chartIdPrefix, iv, iv.startsWith('minute')?200:400) }
-        btns.appendChild(b)
-      })
+        const btns = document.createElement('div')
+        btns.style.marginBottom='1rem'
+        btns.style.display='flex'
+        btns.style.gap='0.5rem'
+        btns.style.flexWrap='wrap'
+        defaultIntervals.forEach(iv=>{
+          const b=document.createElement('button')
+          b.className='btn btn-secondary'
+          b.style.fontSize='0.75rem'
+          b.style.padding='0.375rem 0.75rem'
+          b.textContent = iv.replace('minute','').replace('day','1D').replace('week','1W').replace('month','1M')
+          b.onclick = ()=>{ 
+            // Update active button
+            Array.from(btns.children).forEach(btn => btn.classList.remove('btn'))
+            Array.from(btns.children).forEach(btn => btn.classList.add('btn-secondary'))
+            b.classList.remove('btn-secondary')
+            b.classList.add('btn')
+            loadLightweightChart(defaultTicker, chartIdPrefix, iv, iv.startsWith('minute')?200:400) 
+          }
+          btns.appendChild(b)
+        })
+        // Set first button as active
+        if(btns.firstChild) {
+          btns.firstChild.classList.remove('btn-secondary')
+          btns.firstChild.classList.add('btn')
+        }
       container.parentNode.insertBefore(btns, container)
     }
-    attachIntervalButtons('chart-btc','chart-btc','KRW-BTC')
-    attachIntervalButtons('chart-eth','chart-eth','KRW-ETH')
-    loadLightweightChart('KRW-BTC','chart-btc')
-    loadLightweightChart('KRW-ETH','chart-eth')
+        attachIntervalButtons('chart-btc','chart-btc','KRW-BTC')
+        attachIntervalButtons('chart-eth','chart-eth','KRW-ETH')
+        
+        // Load charts with a slight delay for smooth rendering
+        setTimeout(() => {
+          loadLightweightChart('KRW-BTC','chart-btc')
+          loadLightweightChart('KRW-ETH','chart-eth')
+        }, 100)
   </script>
 </body>
 </html>

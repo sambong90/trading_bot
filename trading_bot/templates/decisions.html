@@ -2,51 +2,91 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Decisions - Trading Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
-  <style>
-    .container{max-width:1000px;margin:20px auto}
-    .card{border:1px solid #e5e5e5;padding:12px;border-radius:8px;background:#fff}
-    table{width:100%;border-collapse:collapse}
-    th,td{padding:8px;border-bottom:1px solid #eee}
-    tr:hover{background:#fafafa}
-    .btn{padding:6px 10px;border:1px solid #ccc;border-radius:6px;background:#f7f7f7;cursor:pointer}
-  </style>
 </head>
 <body>
 {% raw %}
   <div id="app" class="container">
     <div class="nav card">
-      <button class="btn" onclick="location.href='/'">메인</button>
-      <button class="btn" onclick="location.href='/account'">Account</button>
+      <button class="btn" onclick="location.href='/'">📊 메인</button>
+      <button class="btn" onclick="location.href='/decisions'">📈 Decisions</button>
+      <button class="btn" onclick="location.href='/account'">💰 Account</button>
+      <button class="btn" onclick="location.href='/logs'">📝 Logs</button>
     </div>
-    <h1>의사결정(Decisions)</h1>
+    <h1>📈 거래 의사결정</h1>
     <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div>최근 {{ decisions.length }}건</div>
-        <div><button class="btn" @click="refresh">새로고침</button></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+        <div style="display:flex;align-items:center;gap:0.5rem">
+          <span class="badge badge-info">최근 {{ decisions.length }}건</span>
+        </div>
+        <button class="btn" @click="refresh">🔄 새로고침</button>
       </div>
       <hr />
-      <table>
-        <thead><tr><th>시간</th><th>티커</th><th>가격</th><th>신호</th><th>액션</th></tr></thead>
-        <tbody>
-          <tr v-for="d in decisions" :key="d.time" @click="select(d)">
-            <td>{{ formatTime(d.time) }}</td>
-            <td>{{ d.ticker }}</td>
-            <td>{{ formatKRW(d.price) }}</td>
-            <td>{{ signalLabel(d.signal) }}</td>
-            <td>{{ d.action }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>시간</th>
+              <th>티커</th>
+              <th>가격</th>
+              <th>신호</th>
+              <th>액션</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="d in decisions" :key="d.time" @click="select(d)" style="cursor:pointer">
+              <td>{{ formatTime(d.time) }}</td>
+              <td><strong>{{ d.ticker }}</strong></td>
+              <td>{{ formatKRW(d.price) }}</td>
+              <td>
+                <span :class="getSignalBadgeClass(d.signal)">{{ signalLabel(d.signal) }}</span>
+              </td>
+              <td>
+                <span :class="getActionBadgeClass(d.action)">{{ d.action }}</span>
+              </td>
+            </tr>
+            <tr v-if="decisions.length === 0">
+              <td colspan="5" style="text-align:center;padding:2rem;color:var(--text-muted)">
+                거래 결정이 없습니다
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
-    <div v-if="selected" class="card" style="margin-top:12px">
-      <h3>상세: {{ selected.ticker }} @ {{ formatTime(selected.time) }}</h3>
-      <p>액션: <strong>{{ selected.action }}</strong> · 신호: {{ selected.signal }}</p>
-      <p>현금: {{ formatKRW(selected.cash) }} · 포지션: {{ selected.position }}</p>
-      <div id="chart" style="height:320px;margin-top:8px"></div>
-      <button class="btn" @click="selected=null">닫기</button>
+    <div v-if="selected" class="card" style="margin-top:1rem">
+      <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:1rem">
+        <div>
+          <h3 style="margin:0 0 0.5rem 0">{{ selected.ticker }} @ {{ formatTime(selected.time) }}</h3>
+          <div style="display:flex;gap:1rem;flex-wrap:wrap;margin-top:0.5rem">
+            <div>
+              <span style="color:var(--text-muted);font-size:0.875rem">액션:</span>
+              <span :class="getActionBadgeClass(selected.action)" style="margin-left:0.5rem">{{ selected.action }}</span>
+            </div>
+            <div>
+              <span style="color:var(--text-muted);font-size:0.875rem">신호:</span>
+              <span :class="getSignalBadgeClass(selected.signal)" style="margin-left:0.5rem">{{ signalLabel(selected.signal) }}</span>
+            </div>
+          </div>
+        </div>
+        <button class="btn btn-secondary" @click="selected=null">✕ 닫기</button>
+      </div>
+      <div style="background:var(--bg-secondary);padding:1rem;border-radius:0.5rem;margin-bottom:1rem">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem">
+          <div>
+            <div style="color:var(--text-muted);font-size:0.875rem">현금</div>
+            <div style="font-size:1.25rem;font-weight:600;color:var(--text-primary)">{{ formatKRW(selected.cash) }}</div>
+          </div>
+          <div>
+            <div style="color:var(--text-muted);font-size:0.875rem">포지션</div>
+            <div style="font-size:1.25rem;font-weight:600;color:var(--text-primary)">{{ selected.position || '0' }}</div>
+          </div>
+        </div>
+      </div>
+      <div id="chart" style="height:400px;border-radius:0.5rem;overflow:hidden"></div>
     </div>
   </div>
 
@@ -71,22 +111,55 @@
               const closes = candles.map(c=>c.close)
               const ema = computeEMA(closes,20)
               const emaData = candles.map((c,i)=>({time:c.time, value:ema[i]}))
-              const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(0,150,136,0.6)' : 'rgba(255,82,82,0.6)'}))
+              const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)'}))
               const container = document.getElementById('chart')
               container.innerHTML=''
-              const priceFormatter = v => new Intl.NumberFormat('ko-KR').format(v) + '₩'
-              const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height:320, layout:{background:'#ffffff', textColor:'#000'}, localization:{dateFormat:'yyyy-MM-dd'}})
-              chart.timeScale().applyOptions({timeVisible:true})
-              chart.addCandlestickSeries().setData(candles)
-              chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
-              chart.addHistogramSeries({priceScaleId:'', scaleMargins:{top:0.8,bottom:0}}).setData(vols)
+              const chart = LightweightCharts.createChart(container, {
+                width: container.clientWidth, 
+                height: 400, 
+                layout:{
+                  background: { type: 'solid', color: '#1e293b' },
+                  textColor: '#cbd5e1'
+                },
+                grid: {
+                  vertLines: { color: '#334155' },
+                  horzLines: { color: '#334155' }
+                },
+                localization: { dateFormat: 'yyyy-MM-dd HH:mm:ss' },
+                timeScale: {
+                  borderColor: '#334155',
+                  timeVisible: true,
+                  secondsVisible: true
+                }
+              })
+              chart.addCandlestickSeries({
+                upColor: '#10b981',
+                downColor: '#ef4444',
+                borderVisible: false,
+                wickUpColor: '#10b981',
+                wickDownColor: '#ef4444'
+              }).setData(candles)
+              chart.addLineSeries({color:'#f59e0b', lineWidth:2}).setData(emaData)
+              chart.addHistogramSeries({priceScaleId:'', scaleMargins:{top:0.8,bottom:0}, color:'#6366f1'}).setData(vols)
               window.addEventListener('resize', ()=>chart.applyOptions({width:container.clientWidth}))
             }
           }catch(e){console.error(e)}
         },
         formatKRW(v){if(!v&&v!==0) return ''; return new Intl.NumberFormat('ko-KR').format(v)+'₩'},
-        formatTime(t){if(!t) return ''; try{const dt=new Date(t); return dt.toLocaleString('ko-KR')}catch(e){return t}},
-        signalLabel(s){ if(s==1) return '매수'; if(s==-1) return '매도'; return '보류'}
+        formatTime(t){if(!t&&t!==0) return ''; try{const dt=new Date(t); const pad=(n)=>n.toString().padStart(2,'0'); return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`}catch(e){return t}},
+        signalLabel(s){ if(s==1) return '매수'; if(s==-1) return '매도'; return '보류'},
+        getSignalBadgeClass(s){
+          if(s==1) return 'badge badge-success'
+          if(s==-1) return 'badge badge-danger'
+          return 'badge badge-info'
+        },
+        getActionBadgeClass(action){
+          if(!action) return 'badge badge-info'
+          const a = action.toLowerCase()
+          if(a.includes('buy') || a.includes('매수')) return 'badge badge-success'
+          if(a.includes('sell') || a.includes('매도')) return 'badge badge-danger'
+          return 'badge badge-info'
+        }
       },
       mounted(){this.refresh()}
     }).mount('#app')
