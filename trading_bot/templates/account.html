@@ -4,25 +4,45 @@
   <meta charset="utf-8">
   <title>Account - Trading Dashboard</title>
   <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .container{max-width:1000px;margin:20px auto}
+    .card{border:1px solid #e5e5e5;padding:12px;border-radius:8px;background:#fff}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #eee}
+  </style>
 </head>
 <body>
-  <h1>계좌 요약</h1>
-  <div id="summary">Loading...</div>
-  <table id="balances" border="1">
-    <thead><tr><th>통화</th><th>잔고</th><th>평단가</th></tr></thead>
-    <tbody></tbody>
-  </table>
-<script>
-fetch('/api/account/summary').then(r=>r.json()).then(d=>{
-  const tbl=document.querySelector('#balances tbody');
-  const arr=d.balances||[];
-  document.getElementById('summary').innerText='총 자산 항목: '+arr.length;
-  arr.forEach(b=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${b.currency}</td><td>${b.balance}</td><td>${b.avg_buy_price||''}</td>`;
-    tbl.appendChild(tr);
-  })
-})
-</script>
+  <div id="app" class="container">
+    <h1>계좌 요약</h1>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>자산 항목: {{balances.length}}</div>
+        <div><button @click="refresh" class="btn">동기화</button></div>
+      </div>
+      <hr />
+      <table>
+        <thead><tr><th>통화</th><th>잔고</th><th>평단가</th></tr></thead>
+        <tbody>
+          <tr v-for="b in balances" :key="b.currency">
+            <td>{{b.currency}}</td>
+            <td>{{formatNumber(b.balance)}}</td>
+            <td>{{formatNumber(b.avg_buy_price)}}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    const { createApp } = Vue
+    createApp({
+      data(){return {balances:[]}},
+      methods:{
+        refresh(){fetch('/api/account/summary').then(r=>r.json()).then(d=>{this.balances=d.balances||[]})},
+        formatNumber(v){if(!v&&v!==0) return ''; return new Intl.NumberFormat('ko-KR').format(v)}
+      },mounted(){this.refresh()}
+    }).mount('#app')
+  </script>
 </body>
 </html>
