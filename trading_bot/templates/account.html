@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Account - Trading Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <h1>계좌 요약</h1>
+  <div id="summary">Loading...</div>
+  <table id="balances" border="1">
+    <thead><tr><th>통화</th><th>잔고</th><th>평단가</th></tr></thead>
+    <tbody></tbody>
+  </table>
+<script>
+fetch('/api/account/summary').then(r=>r.json()).then(d=>{
+  const tbl=document.querySelector('#balances tbody');
+  const arr=d.balances||[];
+  document.getElementById('summary').innerText='총 자산 항목: '+arr.length;
+  arr.forEach(b=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${b.currency}</td><td>${b.balance}</td><td>${b.avg_buy_price||''}</td>`;
+    tbl.appendChild(tr);
+  })
+})
+</script>
+</body>
+</html>

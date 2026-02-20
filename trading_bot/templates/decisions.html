@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Decisions - Trading Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <h1>의사결정(Decisions)</h1>
+  <div id="summary">Loading...</div>
+  <table id="decisions-table" border="1">
+    <thead><tr><th>시간</th><th>티커</th><th>가격</th><th>신호</th><th>액션</th></tr></thead>
+    <tbody></tbody>
+  </table>
+<script>
+fetch('/api/decisions').then(r=>r.json()).then(d=>{
+  const tbl=document.querySelector('#decisions-table tbody');
+  const arr=d.decisions||[];
+  document.getElementById('summary').innerText='최근 '+arr.length+'건';
+  arr.forEach(it=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${it.time||it.ts||''}</td><td>${it.ticker||''}</td><td>${it.price||''}</td><td>${it.signal||''}</td><td>${it.action||''}</td>`;
+    tbl.appendChild(tr);
+  })
+})
+</script>
+</body>
+</html>
