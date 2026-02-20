@@ -152,7 +152,10 @@ def api_price_ohlcv():
         now = time.time()
         if os.path.exists(cache_file) and now - os.path.getmtime(cache_file) < ttl:
             with open(cache_file) as f:
-                return jsonify(json.load(f))
+                cached = json.load(f)
+            # if cached ohlcv is empty, ignore cache and refetch
+            if cached.get('ohlcv'):
+                return jsonify(cached)
         df = fetch_ohlcv(ticker=ticker, interval=interval, count=count)
         # ensure ts column exists (reset index if needed)
         try:
