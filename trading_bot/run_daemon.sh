@@ -14,5 +14,8 @@ if [ -f "$DIR/../.venv/bin/activate" ]; then
 fi
 LOG_DIR="$DIR/logs"
 mkdir -p "$LOG_DIR"
-# Redirect scheduler stdout/stderr into scheduler_out.log for unified logs
-exec "$DIR/../.venv/bin/python" "$DIR/tasks/scheduler_service.py" >> "$LOG_DIR/scheduler_out.log" 2>&1
+# Redirect scheduler stdout/stderr into both scheduler_out.log and daemon.log (tee)
+PY="$DIR/../.venv/bin/python"
+SCRIPT="$DIR/tasks/scheduler_service.py"
+# Use tee to write to both logs
+exec "$PY" "$SCRIPT" 2>&1 | tee -a "$LOG_DIR/scheduler_out.log" | tee -a "$LOG_DIR/daemon.log"
