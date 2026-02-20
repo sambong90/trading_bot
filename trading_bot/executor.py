@@ -102,18 +102,32 @@ class LiveExecutor:
         # get KRW balance for buys or asset balance for sells as needed
         # place limit order for safety
         try:
-            if side == 'buy':
-                krw_bal = float(self.client.get_balances()[0]['balance'])
-                # compute size
-                spend = krw_bal * size_pct
-                resp = self.client.buy_limit_order('KRW-BTC', price, spend)
-            else:
-                # for sell, use market sell for full position (simplified)
-                resp = self.client.sell_market_order('KRW-BTC', size_pct)
-            # persist order
-            rec = {'time': pd.Timestamp.now().isoformat(), 'side': side, 'price': price, 'qty': resp}
-            self._persist_order(rec, status=str(resp))
-            return resp
+            # wrap network calls with simple retry/backoff
+            import time
+            max_retries = 3
+            for attempt in range(1, max_retries+1):
+                try:
+                    if side == 'buy':
+                        krw_bal = float(self.client.get_balances()[0]['balance'])
+                        spend = krw_bal * size_pct
+                        resp = self.client.buy_limit_order('KRW-BTC', price, spend)
+                    else:
+                        resp = self.client.sell_market_order('KRW-BTC', size_pct)
+                    # parse response: pyupbit returns dict with 'uuid' or similar
+                    order_id = None
+                    if isinstance(resp, dict):
+                        order_id = resp.get('uuid') or resp.get('id') or resp.get('uuid')
+                    rec = {'time': pd.Timestamp.now().isoformat(), 'side': side, 'price': price, 'qty': spend if side=='buy' else resp}
+                    # persist order with order_id if available
+                    self._persist_order({**rec, 'order_id': order_id}, status='submitted')
+                    return resp
+                except Exception as e:
+                    print(f'Live order attempt {attempt} failed:', e)
+                    if attempt < max_retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    else:
+                        raise
         except Exception as e:
             print('Live order failed:', e)
             raise
