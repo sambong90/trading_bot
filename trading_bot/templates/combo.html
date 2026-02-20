@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Combo Detail {{short}}/{{long}}</title>
+  </head>
+  <body>
+    <h1>Combo Detail: {{short}} / {{long}}</h1>
+    <h2>Metrics</h2>
+    <pre>{{ metrics }}</pre>
+    <h2>Equity Curve</h2>
+    {% if equity_html %}
+      <div>{{ equity_html | safe }}</div>
+    {% else %}
+      <p>No equity data available.</p>
+    {% endif %}
+    <h2>Trades</h2>
+    <table border="1">
+      <tr><th>time</th><th>type</th><th>price</th><th>qty</th></tr>
+      {% for t in trades %}
+        <tr>
+          <td>{{ t.time }}</td>
+          <td>{{ t.type }}</td>
+          <td>{{ t.price }}</td>
+          <td>{{ t.qty }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+    <p><a href="/">Back</a></p>
+  </body>
+</html>

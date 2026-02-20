@@ -1,0 +1,17 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Trading Bot Dashboard</title>
+  </head>
+  <body>
+    <h1>Trading Bot - Risk Backtest Dashboard</h1>
+    {% if charts %}
+      {% for key, html in charts.items() %}
+        <div>{{ html | safe }}</div>
+      {% endfor %}
+    {% else %}
+      <p>No data available. Run backtests first.</p>
+    {% endif %}
+  </body>
+</html>
