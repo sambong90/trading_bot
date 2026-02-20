@@ -50,16 +50,16 @@
     </div>
   </div>
 
-  <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@3.7.0/dist/lightweight-charts.standalone.production.js"></script>
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script>
     const { createApp } = Vue
+    function toUnixSeconds(ts){ if(typeof ts==='number') return Math.floor(ts); const n=Date.parse(ts); return isNaN(n)?null:Math.floor(n/1000) }
+    function computeEMA(values, period){ const k=2/(period+1); let ema=[]; let prev=values[0]; ema.push(prev); for(let i=1;i<values.length;i++){ prev = values[i]*k + prev*(1-k); ema.push(prev)} return ema }
     createApp({
       data(){return {decisions:[], selected:null}},
       methods:{
-        refresh(){
-          fetch('/api/decisions').then(r=>r.json()).then(d=>{this.decisions=d.decisions||[]})
-        },
+        refresh(){ fetch('/api/decisions').then(r=>r.json()).then(d=>{this.decisions=d.decisions||[]}) },
         async select(d){
           this.selected=d
           try{
@@ -67,13 +67,18 @@
             const jd = await res.json()
             const ohlcv = jd.ohlcv || []
             if(ohlcv.length){
-              const x = ohlcv.map(r=>r.ts)
-              const open = ohlcv.map(r=>r.open)
-              const high = ohlcv.map(r=>r.high)
-              const low = ohlcv.map(r=>r.low)
-              const close = ohlcv.map(r=>r.close)
-              const trace = [{x:x, open:open, high:high, low:low, close:close, type:'candlestick'}]
-              Plotly.newPlot('chart', trace, {margin:{t:10}})
+              const candles = ohlcv.map(r=>({time:toUnixSeconds(r.ts), open:r.open, high:r.high, low:r.low, close:r.close}))
+              const closes = candles.map(c=>c.close)
+              const ema = computeEMA(closes,20)
+              const emaData = candles.map((c,i)=>({time:c.time, value:ema[i]}))
+              const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(0,150,136,0.6)' : 'rgba(255,82,82,0.6)'}))
+              const container = document.getElementById('chart')
+              container.innerHTML=''
+              const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height:320, layout:{background:'#ffffff', textColor:'#000'}})
+              chart.addCandlestickSeries().setData(candles)
+              chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
+              chart.addHistogramSeries({priceScaleId:'', scaleMargins:{top:0.8,bottom:0}}).setData(vols)
+              window.addEventListener('resize', ()=>chart.applyOptions({width:container.clientWidth}))
             }
           }catch(e){console.error(e)}
         },

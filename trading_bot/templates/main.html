@@ -42,26 +42,62 @@
     </div>
   </div>
 
-  <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@3.7.0/dist/lightweight-charts.standalone.production.js"></script>
   <script>
-    async function loadChart(ticker, el){
+    function toUnixSeconds(ts){
+      // if ts is numeric index, leave; if ISO string, convert
+      if(!ts) return null
+      if(typeof ts === 'number') return Math.floor(ts)
+      const n = Date.parse(ts)
+      if(!isNaN(n)) return Math.floor(n/1000)
+      return null
+    }
+
+    function computeEMA(values, period){
+      const k = 2/(period+1)
+      let ema = []
+      let prev = values[0]
+      ema.push(prev)
+      for(let i=1;i<values.length;i++){
+        const v = values[i]
+        prev = v * k + prev*(1-k)
+        ema.push(prev)
+      }
+      return ema
+    }
+
+    async function loadLightweightChart(ticker, containerId){
       try{
         const res = await fetch('/api/price_ohlcv?ticker='+encodeURIComponent(ticker)+'&interval=minute60&count=200')
         const jd = await res.json()
         const o = jd.ohlcv || []
         if(!o.length) return
-        const x = o.map(r=>r.ts)
-        const open=o.map(r=>r.open), high=o.map(r=>r.high), low=o.map(r=>r.low), close=o.map(r=>r.close)
-        Plotly.newPlot(el, [{x:x, open:open, high:high, low:low, close:close, type:'candlestick'}], {margin:{t:10}})
+        const candles = o.map(r=>({time: toUnixSeconds(r.ts), open: r.open, high: r.high, low: r.low, close: r.close}))
+        const volumes = o.map(r=>({time: toUnixSeconds(r.ts), value: r.volume, color: r.close >= r.open ? 'rgba(0,150,136,0.6)' : 'rgba(255,82,82,0.6)'}))
+        const container = document.getElementById(containerId)
+        container.innerHTML = ''
+        const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height: 320, layout:{background:'#ffffff', textColor:'#000'}})
+        const candleSeries = chart.addCandlestickSeries()
+        candleSeries.setData(candles)
+        // add volume as histogram
+        const volumeSeries = chart.addHistogramSeries({priceScaleId: '', scaleMargins: {top: 0.8, bottom: 0}, color: '#26a69a'})
+        volumeSeries.setData(volumes)
+        // compute EMA(20)
+        const closes = candles.map(c=>c.close)
+        const ema = computeEMA(closes, 20)
+        const emaData = candles.map((c,i)=>({time:c.time, value: ema[i]}))
+        chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
+        window.addEventListener('resize', ()=>{chart.applyOptions({width: container.clientWidth})})
       }catch(e){console.error(e)}
     }
+
     document.getElementById('btnSearch').addEventListener('click', ()=>{
       const s=document.getElementById('symbol').value.trim()
-      if(s) loadChart(s, 'chart-symbol')
+      if(s) loadLightweightChart(s, 'chart-symbol')
     })
     // initial
-    loadChart('KRW-BTC','chart-btc')
-    loadChart('KRW-ETH','chart-eth')
+    loadLightweightChart('KRW-BTC','chart-btc')
+    loadLightweightChart('KRW-ETH','chart-eth')
   </script>
 </body>
 </html>
