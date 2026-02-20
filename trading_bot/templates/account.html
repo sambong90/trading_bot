@@ -13,7 +13,12 @@
 </head>
 <body>
   <div id="app" class="container">
+    <div class="nav card">
+      <button class="btn" onclick="location.href='/'">메인</button>
+      <button class="btn" onclick="location.href='/decisions'">Decisions</button>
+    </div>
     <h1>계좌 요약</h1>
+{% raw %}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>자산 항목: {{balances.length}}</div>
@@ -35,7 +40,7 @@
 
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script>
-    const { createApp } = Vue
+{% endraw %}    const { createApp } = Vue
     createApp({
       data(){return {balances:[]}},
       methods:{
