@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Logs - Trading Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .pre{white-space:pre-wrap;word-break:break-word;background:#111;color:#eee;padding:12px;border-radius:6px;max-height:400px;overflow:auto}
+    .controls{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="nav card">
+      <button class="btn" onclick="location.href='/'">메인</button>
+      <button class="btn" onclick="location.href='/decisions'">Decisions</button>
+      <button class="btn" onclick="location.href='/account'">Account</button>
+      <button class="btn" onclick="location.href='/logs'">Logs</button>
+    </div>
+
+    <h1>실행 로그</h1>
+    <div class="card">
+      <div class="controls">
+        <label><input type="checkbox" id="autoRefresh" checked /> 자동 새로고침(3s)</label>
+        <button class="btn" id="refreshBtn">새로고침</button>
+        <select id="which">
+          <option value="daemon.log">daemon.log</option>
+          <option value="scheduler_out.log">scheduler_out.log</option>
+        </select>
+      </div>
+      <hr />
+      <div id="logContent" class="pre">로딩 중...</div>
+    </div>
+  </div>
+
+  <script>
+    async function loadLogs(){
+      try{
+        const res = await fetch('/api/logs')
+        const j = await res.json()
+        if(!j.ok){ document.getElementById('logContent').textContent = '오류: '+(j.error||'unknown'); return }
+        const which = document.getElementById('which').value
+        const txt = j.logs[which] || ''
+        const el = document.getElementById('logContent')
+        el.textContent = txt || '(빈 파일)'
+        // scroll to bottom
+        el.scrollTop = el.scrollHeight
+      }catch(e){ document.getElementById('logContent').textContent = '오류: '+e }
+    }
+    document.getElementById('refreshBtn').addEventListener('click', loadLogs)
+    document.getElementById('which').addEventListener('change', loadLogs)
+    let timer = null
+    function startAuto(){
+      if(timer) clearInterval(timer)
+      if(document.getElementById('autoRefresh').checked){
+        timer = setInterval(loadLogs,3000)
+      }
+    }
+    document.getElementById('autoRefresh').addEventListener('change', startAuto)
+    // initial
+    loadLogs(); startAuto()
+  </script>
+</body>
+</html>

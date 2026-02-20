@@ -51,6 +51,33 @@ def decisions_page():
 def account_page():
     return render_template('account.html')
 
+@app.route('/logs')
+def logs_page():
+    return render_template('logs.html')
+
+@app.route('/api/logs')
+def api_logs():
+    # return last lines of daemon and scheduler logs
+    try:
+        import json
+        log_dir = os.path.join('trading_bot','logs')
+        files = ['daemon.log','scheduler_out.log']
+        out = {}
+        for f in files:
+            path = os.path.join(log_dir,f)
+            if os.path.exists(path):
+                with open(path,'r',encoding='utf-8',errors='ignore') as fh:
+                    data = fh.read()
+                # limit size
+                if len(data) > 200000:
+                    data = data[-200000:]
+                out[f] = data
+            else:
+                out[f] = ''
+        return jsonify({'ok':True,'logs':out})
+    except Exception as e:
+        return jsonify({'ok':False,'error':str(e)})
+
 @app.route('/api/decisions')
 def api_decisions():
     # return last_decision.json if exists
