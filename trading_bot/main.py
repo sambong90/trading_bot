@@ -1,6 +1,11 @@
 
 from flask import Flask, request, jsonify
-import os
+import os, sys
+from pathlib import Path
+# ensure workspace root on sys.path
+ROOT = str(Path(__file__).resolve().parents[1])
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 app = Flask(__name__)
 
 @app.route('/panic', methods=['POST'])
@@ -36,13 +41,15 @@ import os
 def index():
     return 'Trading bot dashboard (local) - available routes: /decisions /account /api/decisions /api/account/summary'
 
+from flask import render_template
+
 @app.route('/decisions')
 def decisions_page():
-    return jsonify({'msg':'Open /api/decisions for JSON or implement frontend view'})
+    return render_template('decisions.html')
 
 @app.route('/account')
 def account_page():
-    return jsonify({'msg':'Open /api/account/summary for JSON or implement frontend view'})
+    return render_template('account.html')
 
 @app.route('/api/decisions')
 def api_decisions():
@@ -96,6 +103,29 @@ def api_account_summary():
             cur = {'currency':b.get('currency'),'balance':bal,'avg_buy_price':b.get('avg_buy_price')}
             summary.append(cur)
         return jsonify({'balances':summary})
+    except Exception as e:
+        return jsonify({'error':str(e)})
+
+
+@app.route('/api/decision_detail')
+def api_decision_detail():
+    # returns last_decision + recent OHLCV for the ticker
+    try:
+        import json
+        from trading_bot.data import fetch_ohlcv
+        with open('trading_bot/logs/last_decision.json') as f:
+            d = json.load(f)
+        ticker = d.get('ticker')
+        if not ticker:
+            return jsonify({'error':'no ticker in last decision'})
+        # fetch ohlcv
+        try:
+            df = fetch_ohlcv(ticker=ticker, interval='minute60', count=100)
+            # convert to dict
+            ohlcv = df.tail(60)[['ts','open','high','low','close','volume']].to_dict(orient='records')
+        except Exception as e:
+            ohlcv = []
+        return jsonify({'decision':d,'ohlcv':ohlcv})
     except Exception as e:
         return jsonify({'error':str(e)})
 
