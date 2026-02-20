@@ -265,6 +265,31 @@ class LiveExecutor:
             net = pnl - fees
             # include additional planned spend as further loss
             net -= float(additional_spend or 0)
+            # add unrealized P&L: estimate current value of holdings in KRW
+            try:
+                import pyupbit
+                balances = self.client.get_balances() if hasattr(self,'client') and self.client else []
+                unreal = 0.0
+                for b in balances:
+                    try:
+                        cur_bal = float(b.get('balance') or 0)
+                        if cur_bal <= 0:
+                            continue
+                        currency = b.get('currency')
+                        if currency == 'KRW':
+                            unreal += cur_bal
+                            continue
+                        market = f'KRW-{currency}'
+                        price = pyupbit.get_current_price(market)
+                        if price is None:
+                            continue
+                        unreal += cur_bal * float(price)
+                    except Exception:
+                        pass
+                # include unrealized current value into net estimate
+                net += unreal
+            except Exception:
+                pass
             # if net loss beyond threshold, return True
             return net < -float(getattr(self,'MAX_DAILY_LOSS_KRW',50000))
         except Exception:
