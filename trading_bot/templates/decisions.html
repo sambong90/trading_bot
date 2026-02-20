@@ -14,6 +14,7 @@
   </style>
 </head>
 <body>
+{% raw %}
   <div id="app" class="container">
     <h1>의사결정(Decisions)</h1>
     <div class="card">
@@ -40,11 +41,46 @@
       <h3>상세: {{ selected.ticker }} @ {{ formatTime(selected.time) }}</h3>
       <p>액션: <strong>{{ selected.action }}</strong> · 신호: {{ selected.signal }}</p>
       <p>현금: {{ formatKRW(selected.cash) }} · 포지션: {{ selected.position }}</p>
+      <div id="chart" style="height:320px;margin-top:8px"></div>
       <button class="btn" @click="selected=null">닫기</button>
     </div>
   </div>
 
-  <!-- Vue via CDN -->
+  <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    const { createApp } = Vue
+    createApp({
+      data(){return {decisions:[], selected:null}},
+      methods:{
+        refresh(){
+          fetch('/api/decisions').then(r=>r.json()).then(d=>{this.decisions=d.decisions||[]})
+        },
+        async select(d){
+          this.selected=d
+          try{
+            const res = await fetch('/api/decision_detail')
+            const jd = await res.json()
+            const ohlcv = jd.ohlcv || []
+            if(ohlcv.length){
+              const x = ohlcv.map(r=>r.ts)
+              const open = ohlcv.map(r=>r.open)
+              const high = ohlcv.map(r=>r.high)
+              const low = ohlcv.map(r=>r.low)
+              const close = ohlcv.map(r=>r.close)
+              const trace = [{x:x, open:open, high:high, low:low, close:close, type:'candlestick'}]
+              Plotly.newPlot('chart', trace, {margin:{t:10}})
+            }
+          }catch(e){console.error(e)}
+        },
+        formatKRW(v){if(!v&&v!==0) return ''; return new Intl.NumberFormat('ko-KR').format(v)+'₩'},
+        formatTime(t){if(!t) return ''; try{const dt=new Date(t); return dt.toLocaleString('ko-KR')}catch(e){return t}},
+        signalLabel(s){ if(s==1) return '매수'; if(s==-1) return '매도'; return '보류'}
+      },
+      mounted(){this.refresh()}
+    }).mount('#app')
+  </script>
+{% endraw %}
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
   <script>
     const { createApp } = Vue
