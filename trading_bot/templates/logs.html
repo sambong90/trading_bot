@@ -42,11 +42,22 @@
         const which = document.getElementById('which').value
         const txt = j.logs[which] || ''
         const el = document.getElementById('logContent')
-        el.textContent = txt || '(빈 파일)'
+        if(!txt) el.textContent = '(빈 파일)'
+        else{
+          // simple highlighting for ERROR/failed/Traceback/warn
+          const lines = txt.split(/\n/)
+          const html = lines.map(l=>{
+            if(/error|failed|traceback/i.test(l)) return '<div style="color:#ff6b6b">'+escapeHtml(l)+'</div>'
+            if(/warn/i.test(l)) return '<div style="color:#ffb86b">'+escapeHtml(l)+'</div>'
+            return '<div>'+escapeHtml(l)+'</div>'
+          }).join('')
+          el.innerHTML = html
+        }
         // scroll to bottom
         el.scrollTop = el.scrollHeight
       }catch(e){ document.getElementById('logContent').textContent = '오류: '+e }
     }
+    function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
     document.getElementById('refreshBtn').addEventListener('click', loadLogs)
     document.getElementById('which').addEventListener('change', loadLogs)
     let timer = null
@@ -57,7 +68,8 @@
       }
     }
     document.getElementById('autoRefresh').addEventListener('change', startAuto)
-    // initial
+    // initial - default to scheduler_out.log
+    document.getElementById('which').value = 'scheduler_out.log'
     loadLogs(); startAuto()
   </script>
 </body>
