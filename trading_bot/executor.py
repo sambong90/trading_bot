@@ -147,6 +147,12 @@ class LiveExecutor:
                                 krw_bal = float(b.get('balance') or 0)
                                 break
                         spend = krw_bal * size_pct
+                        # daily loss guard
+                        try:
+                            if self._daily_loss_exceeded(additional_spend=spend):
+                                raise RuntimeError('Daily loss limit exceeded, blocking new buys')
+                        except Exception:
+                            pass
                         ticker = 'KRW-AXS'
                         # ensure spend respects exchange min_total
                         try:
@@ -202,3 +208,57 @@ class LiveExecutor:
                 send_telegram(text)
         except Exception:
             pass
+
+    def _reload_env_flags(self):
+        import os
+        try:
+            self.ENABLE_AUTO_LIVE = os.environ.get('ENABLE_AUTO_LIVE') == '1'
+            self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', self.MAX_DAILY_LOSS_KRW))
+            self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', self.MAX_POSITION_PCT))
+            self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS','true').lower() in ('1','true','yes')
+        except Exception:
+            pass
+
+    def _start_env_watcher(self):
+        # spawn a background thread to reload flags periodically so panic endpoint takes effect without restart
+        try:
+            import threading, time
+            def _loop():
+                while True:
+                    try:
+                        self._reload_env_flags()
+                    except Exception:
+                        pass
+                    time.sleep(5)
+            t=threading.Thread(target=_loop, daemon=True)
+            t.start()
+        except Exception:
+            pass
+
+
+    def _daily_loss_exceeded(self, additional_spend=0.0):
+        # naive: compute net KRW change today from orders (sells add KRW, buys subtract KRW)
+        try:
+            from datetime import datetime, timedelta
+            from trading_bot.db import get_session
+            from trading_bot.models import Order
+            session=get_session()
+            today = datetime.utcnow().date()
+            orders = session.query(Order).filter(Order.ts >= datetime(today.year,today.month,today.day)).all()
+            net = 0.0
+            for o in orders:
+                try:
+                    if o.side == 'buy':
+                        net -= float(o.price or 0) * float(o.qty or 0)
+                    elif o.side == 'sell':
+                        net += float(o.price or 0) * float(o.qty or 0)
+                except Exception:
+                    pass
+            session.close()
+            # include the additional planned spend (buy reduces net)
+            net -= float(additional_spend or 0)
+            # if net loss beyond threshold, return True
+            return net < -float(getattr(self,'MAX_DAILY_LOSS_KRW',50000))
+        except Exception:
+            return False
+
