@@ -39,7 +39,7 @@ import os
 # Simple dashboard routes
 @app.route('/')
 def index():
-    return 'Trading bot dashboard (local) - available routes: /decisions /account /api/decisions /api/account/summary'
+    return render_template('main.html')
 
 from flask import render_template
 
@@ -126,6 +126,39 @@ def api_decision_detail():
         except Exception as e:
             ohlcv = []
         return jsonify({'decision':d,'ohlcv':ohlcv})
+    except Exception as e:
+        return jsonify({'error':str(e)})
+
+
+# price ohlcv API with simple cache
+from functools import lru_cache
+import time, json
+CACHE_DIR = 'trading_bot/logs/cache'
+import os
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+@app.route('/api/price_ohlcv')
+def api_price_ohlcv():
+    try:
+        from trading_bot.data import fetch_ohlcv
+        ticker = request.args.get('ticker')
+        interval = request.args.get('interval','minute60')
+        count = int(request.args.get('count','200'))
+        if not ticker:
+            return jsonify({'error':'ticker required'}), 400
+        key = f"{ticker}_{interval}_{count}"
+        cache_file = os.path.join(CACHE_DIR, key + '.json')
+        ttl = 15
+        now = time.time()
+        if os.path.exists(cache_file) and now - os.path.getmtime(cache_file) < ttl:
+            with open(cache_file) as f:
+                return jsonify(json.load(f))
+        df = fetch_ohlcv(ticker=ticker, interval=interval, count=count)
+        ohlcv = df[['ts','open','high','low','close','volume']].to_dict(orient='records')
+        out = {'ticker':ticker,'interval':interval,'ohlcv':ohlcv}
+        with open(cache_file,'w') as f:
+            json.dump(out, f, default=str)
+        return jsonify(out)
     except Exception as e:
         return jsonify({'error':str(e)})
 

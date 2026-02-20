@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Dashboard - Trading Bot</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .row{display:flex;gap:12px}
+    .col{flex:1}
+    .nav{margin-bottom:12px}
+    .search{display:flex;gap:8px}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="nav card">
+      <button class="btn" onclick="location.href='/'">메인</button>
+      <button class="btn" onclick="location.href='/decisions'">Decisions</button>
+      <button class="btn" onclick="location.href='/account'">Account</button>
+      <button class="btn" onclick="location.href='/account'">Orders</button>
+      <button class="btn" onclick="location.href='/status'">Status</button>
+    </div>
+
+    <h1>메인 대시보드</h1>
+    <div class="row">
+      <div class="col card">
+        <h3>BTC (KRW-BTC)</h3>
+        <div id="chart-btc" style="height:320px"></div>
+      </div>
+      <div class="col card">
+        <h3>ETH (KRW-ETH)</h3>
+        <div id="chart-eth" style="height:320px"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="search">
+        <input id="symbol" placeholder="KRW-ATOM" />
+        <button class="btn" id="btnSearch">조회</button>
+      </div>
+      <div id="chart-symbol" style="height:320px;margin-top:8px"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.plot.ly/plotly-2.29.1.min.js"></script>
+  <script>
+    async function loadChart(ticker, el){
+      try{
+        const res = await fetch('/api/price_ohlcv?ticker='+encodeURIComponent(ticker)+'&interval=minute60&count=200')
+        const jd = await res.json()
+        const o = jd.ohlcv || []
+        if(!o.length) return
+        const x = o.map(r=>r.ts)
+        const open=o.map(r=>r.open), high=o.map(r=>r.high), low=o.map(r=>r.low), close=o.map(r=>r.close)
+        Plotly.newPlot(el, [{x:x, open:open, high:high, low:low, close:close, type:'candlestick'}], {margin:{t:10}})
+      }catch(e){console.error(e)}
+    }
+    document.getElementById('btnSearch').addEventListener('click', ()=>{
+      const s=document.getElementById('symbol').value.trim()
+      if(s) loadChart(s, 'chart-symbol')
+    })
+    // initial
+    loadChart('KRW-BTC','chart-btc')
+    loadChart('KRW-ETH','chart-eth')
+  </script>
+</body>
+</html>
