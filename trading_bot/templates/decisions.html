@@ -74,7 +74,9 @@
               const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(0,150,136,0.6)' : 'rgba(255,82,82,0.6)'}))
               const container = document.getElementById('chart')
               container.innerHTML=''
-              const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height:320, layout:{background:'#ffffff', textColor:'#000'}})
+              const priceFormatter = v => new Intl.NumberFormat('ko-KR').format(v) + '₩'
+              const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height:320, layout:{background:'#ffffff', textColor:'#000'}, localization:{dateFormat:'yyyy-MM-dd'}})
+              chart.timeScale().applyOptions({timeVisible:true})
               chart.addCandlestickSeries().setData(candles)
               chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
               chart.addHistogramSeries({priceScaleId:'', scaleMargins:{top:0.8,bottom:0}}).setData(vols)

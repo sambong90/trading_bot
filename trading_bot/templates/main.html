@@ -66,20 +66,30 @@
       return ema
     }
 
-    async function loadLightweightChart(ticker, containerId){
+    async function loadLightweightChart(ticker, containerId, interval='minute60', count=200){
       try{
-        const res = await fetch('/api/price_ohlcv?ticker='+encodeURIComponent(ticker)+'&interval=minute60&count=200')
+        const res = await fetch(`/api/price_ohlcv?ticker=${encodeURIComponent(ticker)}&interval=${encodeURIComponent(interval)}&count=${count}`)
         const jd = await res.json()
         const o = jd.ohlcv || []
-        if(!o.length) return
+        if(!o.length){
+          const container = document.getElementById(containerId)
+          container.innerHTML = '<div style="padding:18px;color:#666">데이터가 없습니다</div>'
+          return
+        }
         const candles = o.map(r=>({time: toUnixSeconds(r.ts), open: r.open, high: r.high, low: r.low, close: r.close}))
         const volumes = o.map(r=>({time: toUnixSeconds(r.ts), value: r.volume, color: r.close >= r.open ? 'rgba(0,150,136,0.6)' : 'rgba(255,82,82,0.6)'}))
         const container = document.getElementById(containerId)
         container.innerHTML = ''
-        const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height: 320, layout:{background:'#ffffff', textColor:'#000'}})
+        // formatter helpers
+        const priceFormatter = v => new Intl.NumberFormat('ko-KR').format(v) + '₩'
+        const timeFormatter = (timestamp) => {
+          const d = new Date(timestamp*1000)
+          return d.toLocaleString('ko-KR', {year:'numeric',month:'2-digit',day:'2-digit', hour:'2-digit', minute:'2-digit'})
+        }
+        const chart = LightweightCharts.createChart(container, {width: container.clientWidth, height: 320, layout:{background:'#ffffff', textColor:'#000'}, priceScale:{borderVisible:false, mode: 1}})
         const candleSeries = chart.addCandlestickSeries()
         candleSeries.setData(candles)
-        // add volume as histogram
+        // add volume as histogram (separate scale)
         const volumeSeries = chart.addHistogramSeries({priceScaleId: '', scaleMargins: {top: 0.8, bottom: 0}, color: '#26a69a'})
         volumeSeries.setData(volumes)
         // compute EMA(20)
@@ -87,15 +97,42 @@
         const ema = computeEMA(closes, 20)
         const emaData = candles.map((c,i)=>({time:c.time, value: ema[i]}))
         chart.addLineSeries({color:'#ff9800', lineWidth:1}).setData(emaData)
+        // axis formatters
+        chart.timeScale().applyOptions({timeVisible:true, rightOffset:2, fixLeftEdge:false})
+        chart.applyOptions({
+          localization: {dateFormat: 'yyyy-MM-dd'},
+          layout:{},
+        })
+        // customize price axis labels
+        const priceScale = chart.priceScale()
+        // resize handling
         window.addEventListener('resize', ()=>{chart.applyOptions({width: container.clientWidth})})
-      }catch(e){console.error(e)}
+      }catch(e){console.error(e); const container=document.getElementById(containerId); container.innerHTML='<div style="padding:18px;color:#c00">오류: '+e+'</div>'}
     }
 
     document.getElementById('btnSearch').addEventListener('click', ()=>{
       const s=document.getElementById('symbol').value.trim()
       if(s) loadLightweightChart(s, 'chart-symbol')
     })
-    // initial
+    // initial with interval selector
+    const defaultIntervals = ['minute1','minute3','minute5','minute15','minute60','day','week','month']
+    function attachIntervalButtons(containerPrefix, chartIdPrefix, defaultTicker){
+      const container = document.getElementById(containerPrefix)
+      if(!container) return
+      const btns = document.createElement('div')
+      btns.style.marginBottom='8px'
+      defaultIntervals.forEach(iv=>{
+        const b=document.createElement('button')
+        b.className='btn'
+        b.style.marginRight='6px'
+        b.textContent = iv.replace('minute','').replace('day','1D').replace('week','1W').replace('month','1M')
+        b.onclick = ()=>{ loadLightweightChart(defaultTicker, chartIdPrefix, iv, iv.startsWith('minute')?200:400) }
+        btns.appendChild(b)
+      })
+      container.parentNode.insertBefore(btns, container)
+    }
+    attachIntervalButtons('chart-btc','chart-btc','KRW-BTC')
+    attachIntervalButtons('chart-eth','chart-eth','KRW-ETH')
     loadLightweightChart('KRW-BTC','chart-btc')
     loadLightweightChart('KRW-ETH','chart-eth')
   </script>
