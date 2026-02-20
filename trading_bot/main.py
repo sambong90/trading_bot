@@ -154,6 +154,18 @@ def api_price_ohlcv():
             with open(cache_file) as f:
                 return jsonify(json.load(f))
         df = fetch_ohlcv(ticker=ticker, interval=interval, count=count)
+        # ensure ts column exists (reset index if needed)
+        try:
+            if 'ts' not in df.columns:
+                df = df.reset_index()
+                if 'index' in df.columns and 'ts' not in df.columns:
+                    df = df.rename(columns={'index':'ts'})
+        except Exception:
+            pass
+        # ensure numeric types
+        for c in ['open','high','low','close','volume']:
+            if c in df.columns:
+                df[c] = df[c].astype(float)
         ohlcv = df[['ts','open','high','low','close','volume']].to_dict(orient='records')
         out = {'ticker':ticker,'interval':interval,'ohlcv':ohlcv}
         with open(cache_file,'w') as f:
