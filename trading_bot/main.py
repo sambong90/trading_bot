@@ -166,6 +166,9 @@ def api_price_ohlcv():
         for c in ['open','high','low','close','volume']:
             if c in df.columns:
                 df[c] = df[c].astype(float)
+        # map common time column names to ts
+        if 'time' in df.columns and 'ts' not in df.columns:
+            df['ts'] = df['time']
         # Ensure ts is an epoch second (if ts is datetime-like in index or column)
         if 'ts' not in df.columns:
             # try using index
@@ -185,8 +188,12 @@ def api_price_ohlcv():
                         return None
                     return int(v)
                 import pandas as pd
-                if pd.api.types.is_datetime64_any_dtype(type(v)):
-                    return int(pd.to_datetime(v).timestamp())
+                # if it's a pandas Timestamp or datetime-like
+                try:
+                    if hasattr(v, 'tzinfo') or isinstance(v, pd.Timestamp):
+                        return int(pd.to_datetime(v).timestamp())
+                except Exception:
+                    pass
                 # try parse
                 t = pd.to_datetime(v)
                 return int(t.timestamp())
