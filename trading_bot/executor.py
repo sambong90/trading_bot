@@ -237,25 +237,33 @@ class LiveExecutor:
 
 
     def _daily_loss_exceeded(self, additional_spend=0.0):
-        # naive: compute net KRW change today from orders (sells add KRW, buys subtract KRW)
+        # compute realized P&L for today using trades table (sells add KRW, buys subtract KRW), include fees
         try:
             from datetime import datetime, timedelta
             from trading_bot.db import get_session
-            from trading_bot.models import Order
+            from trading_bot.models import Trade
             session=get_session()
             today = datetime.utcnow().date()
-            orders = session.query(Order).filter(Order.ts >= datetime(today.year,today.month,today.day)).all()
-            net = 0.0
-            for o in orders:
+            start_dt = datetime(today.year, today.month, today.day)
+            trades = session.query(Trade).filter(Trade.ts >= start_dt).all()
+            pnl = 0.0
+            fees = 0.0
+            for t in trades:
                 try:
-                    if o.side == 'buy':
-                        net -= float(o.price or 0) * float(o.qty or 0)
-                    elif o.side == 'sell':
-                        net += float(o.price or 0) * float(o.qty or 0)
+                    side = (t.side or '').lower()
+                    price = float(t.price or 0)
+                    qty = float(t.qty or 0)
+                    fee = float(t.fee or 0)
+                    if side == 'sell':
+                        pnl += price * qty
+                    elif side == 'buy':
+                        pnl -= price * qty
+                    fees += fee
                 except Exception:
                     pass
             session.close()
-            # include the additional planned spend (buy reduces net)
+            net = pnl - fees
+            # include additional planned spend as further loss
             net -= float(additional_spend or 0)
             # if net loss beyond threshold, return True
             return net < -float(getattr(self,'MAX_DAILY_LOSS_KRW',50000))
