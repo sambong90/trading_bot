@@ -14,4 +14,5 @@ if [ -f "$DIR/../.venv/bin/activate" ]; then
 fi
 LOG_DIR="$DIR/logs"
 mkdir -p "$LOG_DIR"
-exec "$DIR/../.venv/bin/python" "$DIR/tasks/scheduler_service.py" >> "$LOG_DIR/daemon.log" 2>&1
+# Redirect scheduler stdout/stderr into scheduler_out.log for unified logs
+exec "$DIR/../.venv/bin/python" "$DIR/tasks/scheduler_service.py" >> "$LOG_DIR/scheduler_out.log" 2>&1
