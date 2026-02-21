@@ -14,6 +14,7 @@
       <button class="btn" onclick="location.href='/decisions'">📈 Decisions</button>
       <button class="btn" onclick="location.href='/account'">💰 Account</button>
       <button class="btn" onclick="location.href='/logs'">📝 Logs</button>
+      <button class="btn" onclick="location.href='/analysis'">📊 분석 결과</button>
     </div>
     <h1>📈 거래 의사결정</h1>
     <div class="card">
@@ -86,7 +87,7 @@
           </div>
         </div>
       </div>
-      <div id="chart" style="height:400px;border-radius:0.5rem;overflow:hidden"></div>
+      <div id="chart" style="min-height:450px;height:450px;border-radius:0.5rem;overflow:visible;padding-bottom:60px;position:relative;margin-bottom:10px"></div>
     </div>
   </div>
 
@@ -103,7 +104,7 @@
         async select(d){
           this.selected=d
           try{
-            const res = await fetch('/api/decision_detail')
+            const res = await fetch(`/api/decision_detail?ticker=${encodeURIComponent(d.ticker)}`)
             const jd = await res.json()
             const ohlcv = jd.ohlcv || []
             if(ohlcv.length){
@@ -111,7 +112,7 @@
               const closes = candles.map(c=>c.close)
               const ema = computeEMA(closes,20)
               const emaData = candles.map((c,i)=>({time:c.time, value:ema[i]}))
-              const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(16,185,129,0.6)' : 'rgba(239,68,68,0.6)'}))
+              const vols = ohlcv.map(r=>({time:toUnixSeconds(r.ts), value:r.volume, color: r.close>=r.open ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)'}))
               const container = document.getElementById('chart')
               container.innerHTML=''
               const chart = LightweightCharts.createChart(container, {
@@ -135,27 +136,55 @@
               chart.addCandlestickSeries({
                 upColor: '#10b981',
                 downColor: '#ef4444',
-                borderVisible: false,
+                borderUpColor: '#10b981',
+                borderDownColor: '#ef4444',
                 wickUpColor: '#10b981',
-                wickDownColor: '#ef4444'
+                wickDownColor: '#ef4444',
+                borderVisible: true
               }).setData(candles)
-              chart.addLineSeries({color:'#f59e0b', lineWidth:2}).setData(emaData)
-              chart.addHistogramSeries({priceScaleId:'', scaleMargins:{top:0.8,bottom:0}, color:'#6366f1'}).setData(vols)
-              window.addEventListener('resize', ()=>chart.applyOptions({width:container.clientWidth}))
+              chart.addLineSeries({
+                color:'#f59e0b', 
+                lineWidth:2,
+                priceFormat: {
+                  type: 'price',
+                  precision: 0,
+                  minMove: 1
+                }
+              }).setData(emaData)
+              chart.addHistogramSeries({
+                priceScaleId:'', 
+                scaleMargins:{top:0.8,bottom:0}, 
+                color:'rgba(99, 102, 241, 0.4)'
+              }).setData(vols)
+              window.addEventListener('resize', ()=>{
+                const newHeight = (container.clientHeight || 450) - 80  // 하단 시간 라벨 공간 확보하면서 차트 크기 유지
+                chart.applyOptions({
+                  width: container.clientWidth,
+                  height: newHeight
+                })
+              })
             }
           }catch(e){console.error(e)}
         },
         formatKRW(v){if(!v&&v!==0) return ''; return new Intl.NumberFormat('ko-KR').format(v)+'₩'},
         formatTime(t){if(!t&&t!==0) return ''; try{const dt=new Date(t); const pad=(n)=>n.toString().padStart(2,'0'); return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`}catch(e){return t}},
-        signalLabel(s){ if(s==1) return '매수'; if(s==-1) return '매도'; return '보류'},
+        signalLabel(s){ 
+          // 신호 값 정규화
+          const signal = String(s).toLowerCase()
+          if(signal === '1' || signal === 'buy' || signal === '매수') return '매수'
+          if(signal === '-1' || signal === 'sell' || signal === '매도') return '매도'
+          return '보류'
+        },
         getSignalBadgeClass(s){
-          if(s==1) return 'badge badge-success'
-          if(s==-1) return 'badge badge-danger'
+          // 신호 값 정규화 및 타입 변환
+          const signal = String(s).toLowerCase()
+          if(signal === '1' || signal === 'buy' || signal === '매수') return 'badge badge-success'
+          if(signal === '-1' || signal === 'sell' || signal === '매도') return 'badge badge-danger'
           return 'badge badge-info'
         },
         getActionBadgeClass(action){
           if(!action) return 'badge badge-info'
-          const a = action.toLowerCase()
+          const a = String(action).toLowerCase()
           if(a.includes('buy') || a.includes('매수')) return 'badge badge-success'
           if(a.includes('sell') || a.includes('매도')) return 'badge badge-danger'
           return 'badge badge-info'

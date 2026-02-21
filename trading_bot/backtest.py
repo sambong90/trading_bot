@@ -80,19 +80,37 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
             stages['B.equity_curve']['progress'] = pct
             update_phase('B - 백테스트', status='in_progress', stages=stages)
 
+    # 최종 자산 계산 (미청산 포지션 포함)
     final_price = float(df_signals.iloc[-1]['close'])
     final_value = cash + (position * final_price if position > 0 else 0)
     equity_curve.append({'time': str(df_signals.iloc[-1]['time']), 'value': final_value})
     stages['B.equity_curve']['progress'] = 100
     update_phase('B - 백테스트', status='in_progress', stages=stages)
 
+    # 손절/익절 통계 계산
+    stop_loss_trades = [t for t in trades if t.get('reason') == 'stop_loss']
+    take_profit_trades = [t for t in trades if t.get('reason') == 'take_profit']
+    signal_trades = [t for t in trades if t.get('reason') == 'signal']
+    
     # compute metrics with intermediate updates
     stages['B.metrics']['progress'] = 10
     update_phase('B - 백테스트', status='in_progress', stages=stages)
     metrics = compute_metrics(equity_curve)
-    stages['B.metrics']['progress'] = 60
-    update_phase('B - 백테스트', status='in_progress', stages=stages)
-    # small validation
+    
+    # 추가 메트릭 계산
+    total_return = (final_value - initial_cash) / initial_cash
+    max_drawdown = (peak_equity - min([e['value'] for e in equity_curve])) / peak_equity if peak_equity > 0 else 0
+    
+    metrics.update({
+        'total_return': total_return,
+        'max_drawdown': max_drawdown,
+        'total_trades': len(trades),
+        'stop_loss_count': len(stop_loss_trades),
+        'take_profit_count': len(take_profit_trades),
+        'signal_trades_count': len(signal_trades),
+        'win_rate': len([t for t in trades if t['type'] == 'sell' and t.get('price', 0) > entry_price]) / max(1, len([t for t in trades if t['type'] == 'sell'])) if position == 0 else 0
+    })
+    
     stages['B.metrics']['progress'] = 100
     update_phase('B - 백테스트', status='in_progress', stages=stages)
 

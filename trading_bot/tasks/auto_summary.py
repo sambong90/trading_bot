@@ -28,6 +28,13 @@ def read_phase():
     return None
 
 
+def _skip_risk_filter_line(s: str) -> bool:
+    """리스크 필터 실패 등 정상 필터 메시지는 텔레그램/요약에서 제외"""
+    if not s:
+        return True
+    return '리스크 필터 실패' in s or '필터 실패' in s
+
+
 def human_card(phase):
     # Korean pretty card with stages
     lines = []
@@ -49,6 +56,8 @@ def human_card(phase):
     if phase.get('recent_actions'):
         lines.append('\n✅ 최근 완료')
         for a in phase.get('recent_actions')[:5]:
+            if _skip_risk_filter_line(str(a)):
+                continue
             lines.append(f"• {a}")
     if phase.get('next_steps'):
         lines.append('\n🔜 다음 작업')
@@ -61,15 +70,21 @@ def human_card(phase):
     if phase.get('issues'):
         lines.append('\n⚠️ 이슈')
         for it in phase.get('issues'):
+            if _skip_risk_filter_line(str(it)):
+                continue
             lines.append(f"• {it}")
-    # include recent log preview
+    # include recent log preview (리스크 필터 실패 등 정상 필터 로그 제외)
     log_preview = []
     try:
         logs = sorted(LOG_DIR.glob('*.log'), key=lambda p: p.stat().st_mtime, reverse=True)
         if logs:
             with logs[0].open() as f:
                 last = f.readlines()[-5:]
-                log_preview = [l.strip() for l in last if l.strip()]
+                for l in last:
+                    line = l.strip()
+                    if not line or _skip_risk_filter_line(line):
+                        continue
+                    log_preview.append(line)
     except Exception:
         log_preview = []
     if log_preview:
@@ -106,7 +121,7 @@ def main():
     out2.write_text(text)
     # send telegram if configured
     try:
-        ok = send_telegram(text)
+        ok, _ = send_telegram(text)
         if not ok:
             print('Telegram send failed')
     except Exception as e:

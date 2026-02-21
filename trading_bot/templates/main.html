@@ -24,14 +24,14 @@
           <h3 style="margin: 0;">₿ BTC (KRW-BTC)</h3>
           <span class="badge badge-info">실시간</span>
         </div>
-        <div id="chart-btc" style="height:400px; border-radius: 0.5rem; overflow: hidden;"></div>
+        <div id="chart-btc" style="min-height:500px; height:500px; border-radius: 0.5rem; overflow: visible; padding-bottom: 80px; position: relative; margin-bottom: 10px;"></div>
       </div>
       <div class="col card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
           <h3 style="margin: 0;">Ξ ETH (KRW-ETH)</h3>
           <span class="badge badge-info">실시간</span>
         </div>
-        <div id="chart-eth" style="height:400px; border-radius: 0.5rem; overflow: hidden;"></div>
+        <div id="chart-eth" style="min-height:500px; height:500px; border-radius: 0.5rem; overflow: visible; padding-bottom: 80px; position: relative; margin-bottom: 10px;"></div>
       </div>
     </div>
 
@@ -41,7 +41,7 @@
         <input id="symbol" placeholder="예: KRW-ATOM, KRW-SOL, KRW-XRP" style="flex: 1;" />
         <button class="btn" id="btnSearch">조회</button>
       </div>
-      <div id="chart-symbol" style="height:400px; margin-top: 1rem; border-radius: 0.5rem; overflow: hidden;"></div>
+      <div id="chart-symbol" style="min-height:500px; height:500px; margin-top: 1rem; border-radius: 0.5rem; overflow: visible; padding-bottom: 80px; position: relative; margin-bottom: 10px;"></div>
     </div>
   </div>
 
@@ -107,56 +107,182 @@
             secondsVisible: false
           }
         })
-        const candleSeries = chart.addCandlestickSeries({
-          upColor: '#10b981',
-          downColor: '#ef4444',
-          borderVisible: false,
-          wickUpColor: '#10b981',
-          wickDownColor: '#ef4444'
-        })
-        candleSeries.setData(candles)
-        // add volume as histogram (separate scale)
-        const volumeSeries = chart.addHistogramSeries({
-          priceScaleId: '', 
-          scaleMargins: {top: 0.8, bottom: 0}, 
-          color: '#6366f1',
-          lineWidth: 1,
-          priceFormat: {
-            type: 'volume',
-          },
-          overlay: true,
-          scaleMargins: {
-            top: 0.8,
-            bottom: 0,
-          },
-        })
-        volumeSeries.setData(volumes)
-        // compute EMA(20)
-        const closes = candles.map(c=>c.close)
-        const ema = computeEMA(closes, 20)
-        const emaData = candles.map((c,i)=>({time:c.time, value: ema[i]}))
-        chart.addLineSeries({
-          color: '#f59e0b', 
-          lineWidth: 2,
-          priceLineVisible: false,
-          lastValueVisible: true
-        }).setData(emaData)
-        // axis formatters
-        chart.timeScale().applyOptions({timeVisible:true, rightOffset:2, fixLeftEdge:false, secondsVisible:true})
-        chart.applyOptions({
-          localization: {dateFormat: 'yyyy-MM-dd HH:mm:ss'},
-          layout:{},
-        })
-        // customize price axis labels
-        const priceScale = chart.priceScale()
-        // resize handling
-        window.addEventListener('resize', ()=>{chart.applyOptions({width: container.clientWidth})})
+          candleSeries = chart.addCandlestickSeries({
+            upColor: '#10b981',
+            downColor: '#ef4444',
+            borderVisible: false,
+            wickUpColor: '#10b981',
+            wickDownColor: '#ef4444'
+          })
+          candleSeries.setData(candles)
+          
+          // add volume as histogram (separate scale) - 비율 개선
+          volumeSeries = chart.addHistogramSeries({
+            priceScaleId: '', 
+            scaleMargins: {top: 0.75, bottom: 0.15},  // 하단 여백 증가로 시간 라벨 공간 확보
+            color: '#6366f1',
+            lineWidth: 1,
+            priceFormat: {
+              type: 'volume',
+            },
+            overlay: true,
+          })
+          volumeSeries.setData(volumes)
+          
+          // compute EMA(20)
+          const closes = candles.map(c=>c.close)
+          const ema = computeEMA(closes, 20)
+          const emaData = candles.map((c,i)=>({time:c.time, value: ema[i]}))
+          emaSeries = chart.addLineSeries({
+            color: '#f59e0b', 
+            lineWidth: 2,
+            priceLineVisible: false,
+            lastValueVisible: true
+          })
+          emaSeries.setData(emaData)
+          
+          // 차트 인스턴스 저장
+          chartInstances[chartKey] = {
+            chart: chart,
+            candleSeries: candleSeries,
+            volumeSeries: volumeSeries,
+            emaSeries: emaSeries,
+            ticker: ticker,
+            interval: interval,
+            count: count
+          }
+          
+          // axis formatters - 시간 표시 개선 (YYYY-MM-DD HH24:MI:SS 형식)
+          chart.timeScale().applyOptions({
+            timeVisible: true,
+            rightOffset: 20,  // 오른쪽 여백 증가로 시간 라벨이 잘리지 않도록
+            bottomOffset: 30,  // 하단 시간 라벨 공간 (크로스헤어는 상단에 표시)
+            fixLeftEdge: false,
+            fixRightEdge: false,
+            secondsVisible: true,  // 초 단위 표시
+            tickMarkFormatter: (time, tickMarkType, locale) => {
+              const date = new Date(time * 1000)
+              const year = date.getFullYear()
+              const month = (date.getMonth() + 1).toString().padStart(2, '0')
+              const day = date.getDate().toString().padStart(2, '0')
+              const hours = date.getHours().toString().padStart(2, '0')
+              const minutes = date.getMinutes().toString().padStart(2, '0')
+              const seconds = date.getSeconds().toString().padStart(2, '0')
+              
+              // YYYY-MM-DD HH24:MI:SS 형식
+              return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+            }
+          })
+          
+          // 크로스헤어 시간 표시를 상단으로 이동하기 위한 커스텀 처리
+          chart.subscribeCrosshairMove((param) => {
+            if(param.time){
+              const date = new Date(param.time * 1000)
+              const year = date.getFullYear()
+              const month = (date.getMonth() + 1).toString().padStart(2, '0')
+              const day = date.getDate().toString().padStart(2, '0')
+              const hours = date.getHours().toString().padStart(2, '0')
+              const minutes = date.getMinutes().toString().padStart(2, '0')
+              const seconds = date.getSeconds().toString().padStart(2, '0')
+              const timeStr = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+              
+              // 상단에 시간 표시를 위한 커스텀 요소
+              let timeLabel = document.getElementById(`${containerId}-time-label`)
+              if(!timeLabel){
+                timeLabel = document.createElement('div')
+                timeLabel.id = `${containerId}-time-label`
+                timeLabel.style.position = 'absolute'
+                timeLabel.style.top = '10px'
+                timeLabel.style.left = '50%'
+                timeLabel.style.transform = 'translateX(-50%)'
+                timeLabel.style.background = 'rgba(99, 102, 241, 0.95)'
+                timeLabel.style.color = '#fff'
+                timeLabel.style.padding = '6px 16px'
+                timeLabel.style.borderRadius = '6px'
+                timeLabel.style.fontSize = '0.8125rem'
+                timeLabel.style.fontWeight = '600'
+                timeLabel.style.zIndex = '1000'
+                timeLabel.style.pointerEvents = 'none'
+                timeLabel.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)'
+                container.style.position = 'relative'
+                container.appendChild(timeLabel)
+              }
+              timeLabel.textContent = timeStr
+              timeLabel.style.display = 'block'
+            } else {
+              const timeLabel = document.getElementById(`${containerId}-time-label`)
+              if(timeLabel) timeLabel.style.display = 'none'
+            }
+          })
+          
+          chart.applyOptions({
+            localization: {
+              dateFormat: 'yyyy-MM-dd HH:mm:ss',
+              timeFormatter: (time) => {
+                const date = new Date(time * 1000)
+                const year = date.getFullYear()
+                const month = (date.getMonth() + 1).toString().padStart(2, '0')
+                const day = date.getDate().toString().padStart(2, '0')
+                const hours = date.getHours().toString().padStart(2, '0')
+                const minutes = date.getMinutes().toString().padStart(2, '0')
+                const seconds = date.getSeconds().toString().padStart(2, '0')
+                
+                // YYYY-MM-DD HH24:MI:SS 형식
+                return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+              }
+            },
+            layout: {},
+          })
+          
+          // resize handling - 높이도 재계산
+          const resizeHandler = () => {
+            const newHeight = (container.clientHeight || 500) - 100  // 하단 시간 라벨 공간 충분히 확보
+            chart.applyOptions({
+              width: container.clientWidth,
+              height: newHeight
+            })
+          }
+          window.addEventListener('resize', resizeHandler)
+        }
+        
+        // 실시간 업데이트 설정
+        if(enableRealtime){
+          const updateInterval = getUpdateInterval(interval)
+          if(!chartInstances[chartKey].updateTimer){
+            chartInstances[chartKey].updateTimer = setInterval(() => {
+              loadLightweightChart(ticker, containerId, interval, count, true)
+            }, updateInterval)
+          }
+        }
       }catch(e){console.error(e); const container=document.getElementById(containerId); container.innerHTML='<div style="padding:18px;color:#c00">오류: '+e+'</div>'}
+    }
+    
+    // 간격에 따른 업데이트 주기 계산
+    function getUpdateInterval(interval){
+      const intervals = {
+        'minute1': 10000,   // 10초마다 업데이트
+        'minute3': 20000,   // 20초마다 업데이트
+        'minute5': 30000,   // 30초마다 업데이트
+        'minute15': 60000,  // 1분마다 업데이트
+        'minute60': 120000, // 2분마다 업데이트
+        'day': 300000,      // 5분마다 업데이트
+        'week': 600000,     // 10분마다 업데이트
+        'month': 1800000    // 30분마다 업데이트
+      }
+      return intervals[interval] || 60000
     }
 
     document.getElementById('btnSearch').addEventListener('click', ()=>{
       const s=document.getElementById('symbol').value.trim()
-      if(s) loadLightweightChart(s, 'chart-symbol')
+      if(s) {
+        // 기존 타이머 정리
+        const chartKey = `chart-symbol_${s}_minute60`
+        if(chartInstances[chartKey] && chartInstances[chartKey].updateTimer){
+          clearInterval(chartInstances[chartKey].updateTimer)
+          delete chartInstances[chartKey].updateTimer
+        }
+        loadLightweightChart(s, 'chart-symbol', 'minute60', 200, true)
+      }
     })
     // initial with interval selector
     const defaultIntervals = ['minute1','minute3','minute5','minute15','minute60','day','week','month']
@@ -168,26 +294,46 @@
         btns.style.display='flex'
         btns.style.gap='0.5rem'
         btns.style.flexWrap='wrap'
-        defaultIntervals.forEach(iv=>{
+        defaultIntervals.forEach((iv, index)=>{
           const b=document.createElement('button')
+          // 모든 버튼에 동일한 기본 스타일 적용
           b.className='btn btn-secondary'
           b.style.fontSize='0.75rem'
           b.style.padding='0.375rem 0.75rem'
+          b.style.border='1px solid var(--border-color)'
+          b.style.borderRadius='var(--radius-md)'
+          b.style.transition='all var(--transition-base)'
           b.textContent = iv.replace('minute','').replace('day','1D').replace('week','1W').replace('month','1M')
           b.onclick = ()=>{ 
-            // Update active button
-            Array.from(btns.children).forEach(btn => btn.classList.remove('btn'))
-            Array.from(btns.children).forEach(btn => btn.classList.add('btn-secondary'))
+            // Update active button - 스타일 일관성 유지
+            Array.from(btns.children).forEach(btn => {
+              btn.classList.remove('btn')
+              btn.classList.add('btn-secondary')
+              btn.style.background = 'linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%)'
+              btn.style.border = '1px solid var(--border-color)'
+            })
             b.classList.remove('btn-secondary')
             b.classList.add('btn')
-            loadLightweightChart(defaultTicker, chartIdPrefix, iv, iv.startsWith('minute')?200:400) 
+            b.style.background = 'linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%)'
+            b.style.border = 'none'
+            
+            // 기존 타이머 정리
+            const chartKey = `${chartIdPrefix}_${defaultTicker}_${iv}`
+            if(chartInstances[chartKey] && chartInstances[chartKey].updateTimer){
+              clearInterval(chartInstances[chartKey].updateTimer)
+              delete chartInstances[chartKey].updateTimer
+            }
+            
+            loadLightweightChart(defaultTicker, chartIdPrefix, iv, iv.startsWith('minute')?200:400, true) 
           }
           btns.appendChild(b)
         })
-        // Set first button as active
+        // Set first button as active - 동일한 스타일 적용
         if(btns.firstChild) {
           btns.firstChild.classList.remove('btn-secondary')
           btns.firstChild.classList.add('btn')
+          btns.firstChild.style.background = 'linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%)'
+          btns.firstChild.style.border = 'none'
         }
       container.parentNode.insertBefore(btns, container)
     }
@@ -196,9 +342,18 @@
         
         // Load charts with a slight delay for smooth rendering
         setTimeout(() => {
-          loadLightweightChart('KRW-BTC','chart-btc')
-          loadLightweightChart('KRW-ETH','chart-eth')
+          loadLightweightChart('KRW-BTC','chart-btc', 'minute60', 200, true)
+          loadLightweightChart('KRW-ETH','chart-eth', 'minute60', 200, true)
         }, 100)
+        
+        // 페이지 언로드 시 타이머 정리
+        window.addEventListener('beforeunload', () => {
+          Object.values(chartInstances).forEach(instance => {
+            if(instance.updateTimer){
+              clearInterval(instance.updateTimer)
+            }
+          })
+        })
   </script>
 </body>
 </html>

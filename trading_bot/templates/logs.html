@@ -16,6 +16,7 @@
       <button class="btn" onclick="location.href='/decisions'">Decisions</button>
       <button class="btn" onclick="location.href='/account'">Account</button>
       <button class="btn" onclick="location.href='/logs'">Logs</button>
+      <button class="btn" @click="goTo('/analysis')">📊 분석 결과</button>
     </div>
 
     <h1>실행 로그</h1>
@@ -24,8 +25,8 @@
         <label><input type="checkbox" id="autoRefresh" checked /> 자동 새로고침(3s)</label>
         <button class="btn" id="refreshBtn">새로고침</button>
         <select id="which">
-          <option value="daemon.log">daemon.log</option>
-          <option value="scheduler_out.log">scheduler_out.log</option>
+          <option value="auto_trader.log">auto_trader.log (트레이딩 봇)</option>
+          <option value="scheduler_out.log">scheduler_out.log (스케줄러)</option>
         </select>
       </div>
       <hr />
@@ -34,37 +35,82 @@
   </div>
 
   <script>
+    let lastLogLength = 0
     async function loadLogs(){
       try{
         const res = await fetch('/api/logs')
         const j = await res.json()
-        if(!j.ok){ document.getElementById('logContent').textContent = '오류: '+(j.error||'unknown'); return }
+        const statusIndicator = document.getElementById('statusIndicator')
+        const statusText = document.getElementById('statusText')
+        
+        if(!j.ok){ 
+          document.getElementById('logContent').textContent = '오류: '+(j.error||'unknown')
+          statusIndicator.className = 'status-indicator danger'
+          statusText.textContent = '연결 실패'
+          return 
+        }
+        
+        statusIndicator.className = 'status-indicator active'
+        statusText.textContent = '실시간 모니터링 중'
+        
         const which = document.getElementById('which').value
         const txt = j.logs[which] || ''
         const el = document.getElementById('logContent')
-        if(!txt) el.textContent = '(빈 파일)'
-        else{
-          // simple highlighting for ERROR/failed/Traceback/warn
+        
+        if(!txt) {
+          el.textContent = '(빈 파일)'
+          lastLogLength = 0
+        } else {
+          // Check if log has new content
+          const hasNewContent = txt.length !== lastLogLength
+          lastLogLength = txt.length
+          
+          // Enhanced highlighting for different log levels
           const lines = txt.split(/\n/)
           const html = lines.map(l=>{
-            if(/error|failed|traceback/i.test(l)) return '<div style="color:#ff6b6b">'+escapeHtml(l)+'</div>'
-            if(/warn/i.test(l)) return '<div style="color:#ffb86b">'+escapeHtml(l)+'</div>'
-            return '<div>'+escapeHtml(l)+'</div>'
+            const escaped = escapeHtml(l)
+            if(/error|failed|traceback|exception/i.test(l)) {
+              return '<div style="color:#ef4444;font-weight:500">'+escaped+'</div>'
+            }
+            if(/warn|warning/i.test(l)) {
+              return '<div style="color:#f59e0b">'+escaped+'</div>'
+            }
+            if(/info|success|completed|done/i.test(l) && !/error|failed/i.test(l)) {
+              return '<div style="color:#10b981">'+escaped+'</div>'
+            }
+            if(/debug/i.test(l)) {
+              return '<div style="color:#6366f1;opacity:0.8">'+escaped+'</div>'
+            }
+            return '<div style="color:#cbd5e1">'+escaped+'</div>'
           }).join('')
           el.innerHTML = html
+          
+          // Auto scroll to bottom only if new content was added
+          if(hasNewContent) {
+            el.scrollTop = el.scrollHeight
+          }
         }
-        // scroll to bottom
-        el.scrollTop = el.scrollHeight
-      }catch(e){ document.getElementById('logContent').textContent = '오류: '+e }
+      }catch(e){ 
+        document.getElementById('logContent').textContent = '오류: '+e
+        document.getElementById('statusIndicator').className = 'status-indicator danger'
+        document.getElementById('statusText').textContent = '연결 실패'
+      }
     }
     function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
     document.getElementById('refreshBtn').addEventListener('click', loadLogs)
-    document.getElementById('which').addEventListener('change', loadLogs)
+    document.getElementById('which').addEventListener('change', ()=>{
+      lastLogLength = 0
+      loadLogs()
+    })
     let timer = null
     function startAuto(){
       if(timer) clearInterval(timer)
       if(document.getElementById('autoRefresh').checked){
         timer = setInterval(loadLogs,3000)
+        document.getElementById('statusText').textContent = '실시간 모니터링 중'
+      } else {
+        document.getElementById('statusText').textContent = '일시정지됨'
+        document.getElementById('statusIndicator').className = 'status-indicator inactive'
       }
     }
     document.getElementById('autoRefresh').addEventListener('change', startAuto)
