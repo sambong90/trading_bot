@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Periodic Market Briefing: sends a summarized report to Telegram (BTC trend, account, 24h P&L, top ADX).

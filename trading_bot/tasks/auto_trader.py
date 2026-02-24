@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 스케줄러에서 --once 로 주기 실행되는 매매 사이클 진입점.
@@ -182,7 +181,7 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
         sl_distance = atr_val * 2.0
 
     if sl_distance <= 0:
-        return 0.0, risk_pct, sl_distance
+        return 5000.0, risk_pct, 0.1
 
     target_quantity = risk_amount / sl_distance
     base_buy_krw = target_quantity * current_price

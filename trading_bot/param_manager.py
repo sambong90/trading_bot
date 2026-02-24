@@ -1,4 +1,3 @@
-
 """
 Dynamic parameter source for strategy and indicators (V4.0).
 Reads the latest TuningRun by created_at desc; falls back to defaults if none.

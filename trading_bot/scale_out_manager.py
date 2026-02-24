@@ -1,4 +1,3 @@
-
 """
 Scale-Out (Partial Sell) state persistence via SQLite.
 Stage: 0 = no partial sell, 1 = 5% ROI 25% sold, 2 = 10% ROI another 25% sold.

@@ -1,0 +1,18 @@
+# Environment (do not commit secrets)
+.env
+
+# Logs and runtime
+logs/
+*.log
+
+# Databases
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+.venv/
+venv/
+
+# OS
+.DS_Store

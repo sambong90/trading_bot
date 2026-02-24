@@ -3,3 +3,4 @@ pyupbit
 pandas
 numpy
 python-dotenv
+ta

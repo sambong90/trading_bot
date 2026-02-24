@@ -1,4 +1,3 @@
-
 import json
 import pandas as pd
 import numpy as np
@@ -214,6 +213,7 @@ def generate_comprehensive_signal_with_logging(
         # Scale-Out 및 정규 매도 시 sell_size_pct, next_scale_out_stage (반환용)
         signal = 'hold'
         sell_size_pct = 1.0
+        buy_size_pct = 1.0
         next_scale_out_stage = None
         decision_reason_parts = []
         
@@ -267,6 +267,7 @@ def generate_comprehensive_signal_with_logging(
         safe_entry = current_price is not None and bb_mid_val > 0 and current_price <= bb_mid_val
         if squeeze and smart_flow and safe_entry:
             accumulation_mode = True
+            buy_size_pct = 0.5
             signal = 'buy'
             decision_reason_parts.append(
                 f"[Accumulation Detected] BB_Width: {bb_width:.3f} < 0.05, OBV > OBV_SMA. "
@@ -583,6 +584,7 @@ def generate_comprehensive_signal_with_logging(
             'position_size': position_size,
             'risk_adjustments': risk_adjustments,
             'sell_size_pct': sell_size_pct,
+            'size_pct': buy_size_pct,
             'next_scale_out_stage': next_scale_out_stage,
             'indicators': {
                 'adx': adx,

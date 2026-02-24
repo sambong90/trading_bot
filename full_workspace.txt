@@ -1,4 +1,5 @@
 ### 파일명: trading_bot/ai_logger.py ###
+
 """
 AI 전용 분석 로그 — LLM 검증용. 전략 판단·매매 액션만 기록하며 운영 로그와 분리.
 출력: trading_bot/logs/ai_debug.log (| 구분 정형 포맷)
@@ -24,7 +25,9 @@ if not ai_logger.handlers:
     ai_logger.addHandler(_handler)
     ai_logger.propagate = False  # 루트 로거로 전파하지 않음 (콘솔 미출력)
 
+
 ### 파일명: trading_bot/backtest.py ###
+
 import pandas as pd
 import math
 from trading_bot.tasks.state_updater import update_phase
@@ -176,7 +179,9 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
 
     return {'final_value': final_value, 'trades': trades, 'equity_curve': equity_curve, 'metrics': metrics}
 
+
 ### 파일명: trading_bot/dashboard.py ###
+
 from flask import Flask, render_template, jsonify, send_file, abort
 import pandas as pd
 import plotly.express as px
@@ -239,7 +244,9 @@ def data_api():
 if __name__ == '__main__':
     app.run(port=5000)
 
+
 ### 파일명: trading_bot/data.py ###
+
 # ---------------------------------------------------------------------------
 # 라이브러리 설치: pip install pandas
 # (pandas-ta는 strategy.py에서 기술적 지표 계산용으로 사용)
@@ -588,7 +595,9 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
 def save_csv(df, path):
     df.to_csv(path, index=False)
 
+
 ### 파일명: trading_bot/data_manager.py ###
+
 # OHLCV/지표 로드 헬퍼 (strategy에서 사용)
 # data.py 및 DB 기반 래퍼
 import pandas as pd
@@ -835,7 +844,9 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
     finally:
         session.close()
 
+
 ### 파일명: trading_bot/db.py ###
+
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -862,7 +873,9 @@ def ensure_tables():
     from trading_bot.models import Base
     Base.metadata.create_all(bind=engine)
 
+
 ### 파일명: trading_bot/executor.py ###
+
 from datetime import datetime
 import time
 from trading_bot.tasks.state_updater import update_phase
@@ -1321,7 +1334,9 @@ class LiveExecutor:
             return False
 
 
+
 ### 파일명: trading_bot/main.py ###
+
 
 from flask import Flask, request, jsonify
 import os, sys
@@ -1888,7 +1903,9 @@ if __name__ == '__main__':
     print('Backtest final value:', res['final_value'])
     print('Executor cash, positions:', execu.cash, execu.positions)
 
+
 ### 파일명: trading_bot/models.py ###
+
 """
 SQLite 스키마. 기존 DB에 컬럼/인덱스 추가 시 마이그레이션 가이드:
 
@@ -2069,7 +2086,9 @@ class PositionState(Base):
     avg_buy_price = Column(Float, default=0.0)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+
 ### 파일명: trading_bot/monitor.py ###
+
 import os
 import requests
 from typing import Optional, Tuple
@@ -2137,7 +2156,9 @@ if __name__ == '__main__':
     except Exception as ex:
         print("Telegram not configured:", ex)
 
+
 ### 파일명: trading_bot/param_manager.py ###
+
 """
 Dynamic parameter source for strategy and indicators (V4.0).
 Reads the latest TuningRun by created_at desc; falls back to defaults if none.
@@ -2172,7 +2193,9 @@ def get_best_params():
     finally:
         session.close()
 
+
 ### 파일명: trading_bot/risk.py ###
+
 def check_daily_loss(cash, starting_cash, daily_loss_limit_pct=0.03):
     draw = (starting_cash - cash) / starting_cash
     return draw <= daily_loss_limit_pct
@@ -2199,7 +2222,9 @@ def calculate_adjusted_position_size(
     }
     return base_size, risk_adjustments
 
+
 ### 파일명: trading_bot/scale_out_manager.py ###
+
 """
 Scale-Out (Partial Sell) state persistence via SQLite.
 Stage: 0 = no partial sell, 1 = 5% ROI 25% sold, 2 = 10% ROI another 25% sold.
@@ -2267,7 +2292,9 @@ def set_scale_out_stage(ticker: str, new_stage: int, current_avg_buy_price: floa
     finally:
         session.close()
 
+
 ### 파일명: trading_bot/strategy.py ###
+
 import json
 import pandas as pd
 import numpy as np
@@ -2483,6 +2510,7 @@ def generate_comprehensive_signal_with_logging(
         # Scale-Out 및 정규 매도 시 sell_size_pct, next_scale_out_stage (반환용)
         signal = 'hold'
         sell_size_pct = 1.0
+        buy_size_pct = 1.0
         next_scale_out_stage = None
         decision_reason_parts = []
         
@@ -2536,6 +2564,7 @@ def generate_comprehensive_signal_with_logging(
         safe_entry = current_price is not None and bb_mid_val > 0 and current_price <= bb_mid_val
         if squeeze and smart_flow and safe_entry:
             accumulation_mode = True
+            buy_size_pct = 0.5
             signal = 'buy'
             decision_reason_parts.append(
                 f"[Accumulation Detected] BB_Width: {bb_width:.3f} < 0.05, OBV > OBV_SMA. "
@@ -2852,6 +2881,7 @@ def generate_comprehensive_signal_with_logging(
             'position_size': position_size,
             'risk_adjustments': risk_adjustments,
             'sell_size_pct': sell_size_pct,
+            'size_pct': buy_size_pct,
             'next_scale_out_stage': next_scale_out_stage,
             'indicators': {
                 'adx': adx,
@@ -2874,10 +2904,14 @@ def generate_comprehensive_signal_with_logging(
             'indicators': {}
         }
 
+
 ### 파일명: trading_bot/tasks/__init__.py ###
+
 # tasks package init
 
+
 ### 파일명: trading_bot/tasks/auto_summary.py ###
+
 #!/usr/bin/env python3
 import os
 import sys
@@ -3012,7 +3046,9 @@ def main():
 if __name__ == '__main__':
     main()
 
+
 ### 파일명: trading_bot/tasks/auto_trader.py ###
+
 #!/usr/bin/env python3
 """
 스케줄러에서 --once 로 주기 실행되는 매매 사이클 진입점.
@@ -3196,7 +3232,7 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
         sl_distance = atr_val * 2.0
 
     if sl_distance <= 0:
-        return 0.0, risk_pct, sl_distance
+        return 5000.0, risk_pct, 0.1
 
     target_quantity = risk_amount / sl_distance
     base_buy_krw = target_quantity * current_price
@@ -3584,7 +3620,9 @@ def main():
 if __name__ == '__main__':
     main()
 
+
 ### 파일명: trading_bot/tasks/auto_tuner.py ###
+
 #!/usr/bin/env python3
 """
 Walk-Forward Auto Tuner (V4.0): fetches 30 days of 1h OHLCV for KRW-BTC and KRW-SOL,
@@ -3714,7 +3752,9 @@ def main():
 if __name__ == '__main__':
     main()
 
+
 ### 파일명: trading_bot/tasks/db_maintenance.py ###
+
 #!/usr/bin/env python3
 """
 DB 하우스키핑(Pruning): 장기 운용 시 용량·조회 속도 유지를 위해 오래된 데이터 정리.
@@ -3808,7 +3848,9 @@ def main():
 if __name__ == '__main__':
     main()
 
+
 ### 파일명: trading_bot/tasks/market_briefing.py ###
+
 #!/usr/bin/env python3
 """
 Periodic Market Briefing: sends a summarized report to Telegram (BTC trend, account, 24h P&L, top ADX).
@@ -3841,7 +3883,9 @@ def main():
 if __name__ == "__main__":
     main()
 
+
 ### 파일명: trading_bot/tasks/progress.py ###
+
 import json
 import time
 from pathlib import Path
@@ -3871,7 +3915,9 @@ def read_progress():
     except Exception:
         return {'ts': time.time(), 'phase': 'idle', 'task': None, 'percent': 0, 'msg': None}
 
+
 ### 파일명: trading_bot/tasks/scheduler_service.py ###
+
 #!/usr/bin/env python3
 import os
 import sys
@@ -4001,7 +4047,9 @@ if __name__ == '__main__':
     except (KeyboardInterrupt, SystemExit):
         sched.shutdown()
 
+
 ### 파일명: trading_bot/tasks/state_updater.py ###
+
 #!/usr/bin/env python3
 import json
 import pathlib
@@ -4072,7 +4120,9 @@ def update_phase(phase: str, status: str = 'in_progress', percent: int = None, r
 if __name__ == '__main__':
     print(update_phase('예시 단계', 'in_progress', None, ['작업1 완료'], ['다음 작업'], stages={'B.equity':{'weight':40,'progress':50},'B.metrics':{'weight':60,'progress':20}}))
 
+
 ### 파일명: trading_bot/telegram_bot.py ###
+
 #!/usr/bin/env python3
 """
 Interactive Telegram Chatbot for monitoring and controlling the trading bot.
@@ -4454,7 +4504,9 @@ def main():
 if __name__ == "__main__":
     main()
 
+
 ### 파일명: trading_bot/tests/run_unit_tests.py ###
+
 import importlib.util
 import pathlib
 import sys
@@ -4502,7 +4554,9 @@ except Exception as e:
 
 print('Unit tests complete.')
 
+
 ### 파일명: trading_bot/tuner.py ###
+
 import itertools
 import pandas as pd
 from copy import deepcopy
@@ -4548,4 +4602,5 @@ def grid_search(strategy_fn, df, param_grid, backtest_fn, fee_pct=0.0005, slippa
         print('Failed to write tuning runs to DB:', e)
 
     return df_res
+
 

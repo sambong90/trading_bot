@@ -1,4 +1,3 @@
-
 import pandas as pd
 import math
 from trading_bot.tasks.state_updater import update_phase

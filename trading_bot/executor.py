@@ -1,4 +1,3 @@
-
 from datetime import datetime
 import time
 from trading_bot.tasks.state_updater import update_phase
