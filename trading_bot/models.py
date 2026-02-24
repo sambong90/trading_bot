@@ -1,3 +1,4 @@
+
 """
 SQLite 스키마. 기존 DB에 컬럼/인덱스 추가 시 마이그레이션 가이드:
 
@@ -167,3 +168,14 @@ class TuningRun(Base):
     combo = Column(JSON)
     metrics = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PositionState(Base):
+    """Scale-out stage and avg buy price per ticker. Used for 25-25-50 partial sell state."""
+    __tablename__ = 'position_states'
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, unique=True, index=True, nullable=False)
+    stage = Column(Integer, default=0)
+    avg_buy_price = Column(Float, default=0.0)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

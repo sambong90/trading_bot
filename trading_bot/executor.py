@@ -1,3 +1,4 @@
+
 from datetime import datetime
 import time
 from trading_bot.tasks.state_updater import update_phase
@@ -96,6 +97,10 @@ class PaperExecutor:
     def get_position_qty(self, ticker):
         """해당 티커 보유 수량. Paper는 로컬 positions 기준."""
         return float(self.positions.get(ticker, {}).get('qty', 0) or 0)
+
+    def get_avg_buy_price(self, ticker):
+        """해당 티커 평균 매수가. Paper는 로컬 positions 기준."""
+        return float(self.positions.get(ticker, {}).get('avg_price', 0) or 0)
 
     def get_available_cash(self):
         """가용 현금(KRW). Two-Pass Pass 2 매수 한도 판단용."""
@@ -298,23 +303,35 @@ class LiveExecutor:
             raise
 
     def refresh_balance_cache(self):
-        """사이클 시작 시 1회 호출. get_balances()로 잔고 캐시 갱신 → get_position_qty 시 API 추가 호출 없음."""
+        """사이클 시작 시 1회 호출. get_balances()로 잔고·평균매수가 캐시 갱신."""
         if not getattr(self, 'client', None):
             return
         try:
             bal_list = self.client.get_balances()
             self._balance_cache = {}
+            self._avg_buy_price_cache = {}
             for b in bal_list:
                 cur = b.get('currency')
                 if cur:
                     self._balance_cache[cur] = float(b.get('balance') or 0)
+                    try:
+                        avg = b.get('avg_buy_price')
+                        self._avg_buy_price_cache[cur] = float(avg) if avg is not None else 0.0
+                    except (TypeError, ValueError):
+                        self._avg_buy_price_cache[cur] = 0.0
         except Exception:
             self._balance_cache = getattr(self, '_balance_cache', {})
+            self._avg_buy_price_cache = getattr(self, '_avg_buy_price_cache', {})
 
     def get_position_qty(self, ticker):
         """해당 티커 보유 수량. refresh_balance_cache() 호출 후 사용 권장 (Live 시 API 1회만)."""
         asset = ticker.split('-')[1] if '-' in ticker else ''
         return float(self._balance_cache.get(asset, 0) or 0)
+
+    def get_avg_buy_price(self, ticker):
+        """해당 티커 평균 매수가. refresh_balance_cache() 호출 후 사용 권장."""
+        asset = ticker.split('-')[1] if '-' in ticker else ''
+        return float(getattr(self, '_avg_buy_price_cache', {}).get(asset, 0) or 0)
 
     def get_available_cash(self):
         """가용 현금(KRW). Two-Pass Pass 2 매수 한도 판단용. refresh_balance_cache() 후 호출 권장."""
@@ -438,4 +455,5 @@ class LiveExecutor:
             return net < -float(getattr(self,'MAX_DAILY_LOSS_KRW',50000))
         except Exception:
             return False
+
 

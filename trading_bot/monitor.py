@@ -1,3 +1,4 @@
+
 import os
 import requests
 from typing import Optional, Tuple
@@ -13,8 +14,9 @@ TELEGRAM_CHAT_ENV = "TELEGRAM_CHAT_ID"
 
 
 def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
-    """Send a Telegram message via bot API.
+    """Send a Telegram message via bot API (one-way notifications).
 
+    Compatible with telegram_bot.py listener: both use the same Bot API; alerts and chat commands work independently.
     Expects environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID if token/chat_id not provided.
     Returns (True, None) on success, (False, error_message) on failure. Retries without proxy on proxy/connection errors if TELEGRAM_USE_PROXY set.
     """
@@ -63,3 +65,4 @@ if __name__ == '__main__':
             print("Failed to send test message. See printed error.")
     except Exception as ex:
         print("Telegram not configured:", ex)
+

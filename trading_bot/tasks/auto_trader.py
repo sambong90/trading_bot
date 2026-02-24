@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 스케줄러에서 --once 로 주기 실행되는 매매 사이클 진입점.
@@ -14,6 +15,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# .env 로드 — override=True로 부모(스케줄러)에서 물려받은 TRADING_MODE=paper를 .env 값으로 덮어씀
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / 'trading_bot' / '.env', override=True)
+except Exception:
+    pass
 
 # 로깅: auto_trader.log에 기록 (대시보드에서 조회)
 LOG_DIR = ROOT / 'trading_bot' / 'logs'
@@ -30,6 +37,25 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# AI 전용 분석 로그 (trading_bot/logs/ai_debug.log) — 전략·매매 액션만 기록
+try:
+    from trading_bot.ai_logger import ai_logger
+except Exception:
+    ai_logger = logging.getLogger('trading_bot.ai')
+# 서브프로세스/다른 CWD에서 실행 시 ai_debug.log 핸들러가 없을 수 있음 → 명시적으로 보강
+_ai_log_file = ROOT / 'trading_bot' / 'logs' / 'ai_debug.log'
+_ai_log_file.parent.mkdir(parents=True, exist_ok=True)
+_has_ai_handler = any(
+    getattr(h, 'baseFilename', None) and 'ai_debug.log' in str(getattr(h, 'baseFilename', ''))
+    for h in getattr(ai_logger, 'handlers', [])
+)
+if not _has_ai_handler:
+    _fh = logging.FileHandler(_ai_log_file, encoding='utf-8')
+    _fh.setFormatter(logging.Formatter(fmt='%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    ai_logger.addHandler(_fh)
+    ai_logger.setLevel(logging.INFO)
+    ai_logger.propagate = False
 
 DEFAULT_INTERVAL = 'minute60'
 DEFAULT_COUNT = 200
@@ -62,15 +88,130 @@ def get_executor(mode):
     return PaperExecutor(initial_cash=ACCOUNT_VALUE), 'paper'
 
 
-def analyze_ticker(ticker, executor, mode, defer_buy=False):
+# ---------------------------------------------------------------------------
+# BTC 거시 장세 필터 (Global Market Filter): 대장주 하락 시 알트 매수 리스크 방지
+# ---------------------------------------------------------------------------
+def check_btc_global_trend(interval='day', count=50, ema_short=20, ema_long=50):
+    """
+    KRW-BTC의 장기 봉(일봉/4시간봉) 기준 EMA로 상승장 여부 판단.
+    - 현재가 < EMA50 → 하락장(False)
+    - 단기 이평이 장기 이평을 데드크로스한 상태(EMA20 < EMA50) → 하락장(False)
+    - 그 외 → 상승/안전장(True)
+    실패 시 안전하게 True 반환(필터 비적용).
+    """
+    import pandas as pd
+    try:
+        from trading_bot.data import fetch_ohlcv
+        df = fetch_ohlcv(ticker='KRW-BTC', interval=interval, count=count, use_db_first=True)
+        if df is None or len(df) < ema_long:
+            return True
+        close = df['close']
+        ema_s = close.ewm(span=ema_short, adjust=False).mean()
+        ema_l = close.ewm(span=ema_long, adjust=False).mean()
+        current_price = float(close.iloc[-1])
+        last_ema_s = float(ema_s.iloc[-1])
+        last_ema_l = float(ema_l.iloc[-1])
+        prev_ema_s = float(ema_s.iloc[-2]) if len(ema_s) >= 2 else last_ema_s
+        prev_ema_l = float(ema_l.iloc[-2]) if len(ema_l) >= 2 else last_ema_l
+        # 하락장 조건: 현재가가 EMA50 미만, 또는 데드크로스 상태(단기 < 장기)
+        if current_price < last_ema_l:
+            return False
+        if last_ema_s < last_ema_l and prev_ema_s >= prev_ema_l:
+            return False  # 방금 데드크로스
+        if last_ema_s < last_ema_l:
+            return False  # 이미 데드크로스된 상태
+        return True
+    except Exception as e:
+        logger.debug('check_btc_global_trend 실패(필터 비적용): %s', e)
+        return True
+
+
+def compute_total_account_equity(executor, tickers):
+    """
+    현재 사이클 기준 총 계좌 평가액(KRW)을 근사 계산.
+    - 가용 KRW + 각 티커 보유수량 * 현재가(Upbit 시세)
+    """
+    try:
+        import pyupbit
+    except Exception:
+        # pyupbit 사용 불가 시 보수적으로 가용 현금만 사용
+        return float(executor.get_available_cash())
+
+    try:
+        total = float(executor.get_available_cash() or 0)
+    except Exception:
+        total = 0.0
+
+    seen = set()
+    for t in tickers:
+        if t in seen:
+            continue
+        seen.add(t)
+        try:
+            qty = float(executor.get_position_qty(t) or 0)
+            if qty <= 0:
+                continue
+            price = pyupbit.get_current_price(t)
+            if price is None:
+                continue
+            total += qty * float(price)
+        except Exception:
+            continue
+    return float(total or 0.0)
+
+
+def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global_bull_market):
+    """
+    Regime-Dependent Dynamic Position Sizing (Risk Parity).
+    반환: (final_buy_krw, risk_pct, sl_distance)
+    """
+    if current_price is None or current_price <= 0 or total_equity <= 0:
+        return 0.0, 0.0, 0.0
+
+    risk_pct = 0.05 if is_global_bull_market else 0.02
+    risk_amount = total_equity * risk_pct
+
+    try:
+        atr_val = float(atr or 0)
+    except Exception:
+        atr_val = 0.0
+
+    if not (atr_val and atr_val > 0):
+        sl_distance = current_price * 0.05
+    else:
+        sl_distance = atr_val * 2.0
+
+    if sl_distance <= 0:
+        return 0.0, risk_pct, sl_distance
+
+    target_quantity = risk_amount / sl_distance
+    base_buy_krw = target_quantity * current_price
+
+    max_per_coin = total_equity * 0.20
+    bounded_buy_krw = min(max(base_buy_krw, MIN_ORDER_KRW), max_per_coin)
+
+    try:
+        sp = float(size_pct or 0)
+    except Exception:
+        sp = 0.0
+    sp = max(0.0, min(1.0, sp)) or 1.0
+
+    final_buy_krw = bounded_buy_krw * sp
+    return float(final_buy_krw), float(risk_pct), float(sl_distance)
+
+
+def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_market=True):
     """
     티커 1개 분석 후 신호 처리.
     defer_buy=True(투패스 모드)일 때: sell은 즉시 실행, buy는 실행하지 않고 ('pending_buy', reason, data) 반환.
+    is_global_bull_market=False이면 buy 신호를 hold로 덮어쓰고 매도만 수행.
     반환: (status, reason, data). data는 status=='pending_buy'일 때만 채워짐.
     """
     from trading_bot.data import fetch_ohlcv
     from trading_bot.data_manager import sync_indicators_for_ticker
     from trading_bot.strategy import generate_comprehensive_signal_with_logging
+    from trading_bot.scale_out_manager import get_scale_out_state, set_scale_out_stage
+    from trading_bot.param_manager import get_best_params
 
     try:
         df = fetch_ohlcv(ticker=ticker, interval=DEFAULT_INTERVAL, count=DEFAULT_COUNT)
@@ -92,13 +233,25 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False):
     except Exception:
         current_price = None
 
+    position_qty = executor.get_position_qty(ticker)
+    avg_buy_price = executor.get_avg_buy_price(ticker)
+    scale_out_stage = get_scale_out_state(ticker, avg_buy_price or 0.0, position_qty or 0.0)
+    current_roi = ((current_price - avg_buy_price) / avg_buy_price * 100) if (avg_buy_price and float(avg_buy_price) > 0 and current_price is not None) else 0.0
+    best_params = get_best_params()
+    adx_trend_threshold = float(best_params.get('adx_trend_threshold', 25.0))
+
     try:
         result = generate_comprehensive_signal_with_logging(
             ticker=ticker,
             timeframe=DEFAULT_INTERVAL,
             current_price=current_price,
             account_value=ACCOUNT_VALUE,
+            adx_trend_threshold=adx_trend_threshold,
             use_dynamic_risk=True,
+            is_global_bull_market=is_global_bull_market,
+            position_qty=position_qty or 0.0,
+            current_roi=current_roi,
+            scale_out_stage=scale_out_stage,
         )
     except Exception as e:
         logger.warning('[오류] %s — 신호 생성 중 예외: %s', ticker, str(e))
@@ -110,6 +263,9 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False):
     reason = result.get('decision_reason', '')
     indicators = result.get('indicators') or {}
     adx = float(indicators.get('adx', 0) or 0)
+    atr = float(indicators.get('atr', 0) or 0)
+
+    # BTC 거시 필터·경주마 예외는 strategy.generate_comprehensive_signal_with_logging 내부에서 처리됨
 
     if '캐싱된 지표 데이터 없음' in reason:
         logger.debug('[건너뜀] %s — 캐싱된 지표 없음 (전략 미판단)', ticker)
@@ -124,7 +280,19 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False):
 
     # 매수: defer_buy(투패스)일 때는 실행하지 않고 pending_buys용 데이터만 반환
     if signal == 'buy' and position_size > 0:
-        size_pct = max(0.01, min(1.0, position_size / ACCOUNT_VALUE)) if ACCOUNT_VALUE > 0 else 0.02
+        # 전략에서 명시한 size_pct가 있으면 우선 사용, 없으면 position_size 기반으로 계산
+        strategy_size_pct = result.get('size_pct')
+        if strategy_size_pct is not None:
+            try:
+                size_pct = float(strategy_size_pct)
+            except (TypeError, ValueError):
+                size_pct = None
+        else:
+            size_pct = None
+        if size_pct is None:
+            size_pct = max(0.01, min(1.0, position_size / ACCOUNT_VALUE)) if ACCOUNT_VALUE > 0 else 0.02
+        else:
+            size_pct = max(0.01, min(1.0, size_pct))
         if defer_buy:
             estimated_spend = ACCOUNT_VALUE * size_pct if current_price else 0
             return 'pending_buy', reason, {
@@ -134,30 +302,48 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False):
                 'position_size': position_size,
                 'size_pct': size_pct,
                 'estimated_spend': estimated_spend,
+                'atr': atr,
             }
         try:
             executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker)
             logger.info('✅ %s 매수 신호 실행: 가격 %.0f, 비중 %.2f%%', ticker, current_price, size_pct * 100)
+            alloc = ACCOUNT_VALUE * size_pct if current_price else 0
+            ai_logger.info('[EXECUTE] %s | ACTION:BUY | Amt:%.0fKRW | ADX_Score:%.1f', ticker, alloc, adx)
             return 'executed', None, None
         except Exception as e:
             logger.warning('[오류] %s — 매수 주문 실행 실패: %s', ticker, str(e))
             return 'error', str(e), None
 
     if signal == 'sell':
-        position_qty = executor.get_position_qty(ticker)
-        if position_qty <= 0:
-            logger.info('[매도 스킵] %s — 보유 잔고 없음 (매도 스킵)', ticker)
+        position_qty_sell = executor.get_position_qty(ticker)
+        if position_qty_sell <= 0:
+            logger.debug('[매도 스킵] %s — 보유 잔고 없음', ticker)
+            ai_logger.info('[SKIP] %s | REASON:매도스킵(보유잔고없음)', ticker)
             return 'hold', '보유 잔고 없음 (매도 스킵)', None
-        position_value = (current_price or 0) * position_qty
+        position_value = (current_price or 0) * position_qty_sell
         if position_value < MIN_ORDER_KRW:
-            logger.info('[매도 스킵] %s — 보유 금액 %.0f원 < 최소 주문 %s원 (매도 스킵)', ticker, position_value, MIN_ORDER_KRW)
+            logger.debug('[매도 스킵] %s — 보유 금액 %.0f원 < 최소 주문 %s원', ticker, position_value, MIN_ORDER_KRW)
+            ai_logger.info('[SKIP] %s | REASON:매도스킵(최소주문미만) | HoldValue:%.0fKRW', ticker, position_value)
             return 'hold', '보유 잔고 없음 (매도 스킵)', None
+        sell_size_pct = result.get('sell_size_pct', 1.0)
+        next_scale_out_stage = result.get('next_scale_out_stage')
         try:
-            executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker)
-            logger.info('✅ %s 매도 신호 실행: 가격 %.0f', ticker, current_price)
+            executor.place_order('sell', current_price, size_pct=sell_size_pct, ticker=ticker)
+            logger.info('✅ %s 매도 신호 실행: 가격 %.0f, 비중 %.0f%%', ticker, current_price, sell_size_pct * 100)
+            ai_logger.info('[EXECUTE] %s | ACTION:SELL | Qty:%s | Reason:신호발생', ticker, position_qty_sell)
+            if next_scale_out_stage is not None:
+                set_scale_out_stage(ticker, next_scale_out_stage, avg_buy_price or 0.0)
+            if sell_size_pct >= 1.0:
+                get_scale_out_state(ticker, 0.0, 0.0)
+            try:
+                from trading_bot.monitor import send_telegram
+                send_telegram(f'🔴 매도 체결: {ticker} @ {current_price:,.0f}원')
+            except Exception:
+                pass
             return 'executed', None, None
         except Exception as e:
             logger.warning('[오류] %s — 매도 주문 실행 실패: %s', ticker, str(e))
+            ai_logger.info('[ERROR] %s | ACTION:SELL | Msg:%s', ticker, str(e)[:100])
             return 'error', str(e), None
 
     return 'hold', reason, None
@@ -183,6 +369,20 @@ def run_cycle(mode):
 
     # Live 시 잔고 1회 조회 후 캐시 사용 → 티커별 get_position_qty 시 API 추가 호출 없음
     executor.refresh_balance_cache()
+    try:
+        from trading_bot.monitor import send_telegram
+        cash = executor.get_available_cash()
+        msg = (
+            f'📊 트레이딩 사이클 시작 [{cycle_id}]\n'
+            f'시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+            f'모드: {effective_mode}\n'
+            f'티커: {len(tickers)}개\n'
+            f'실행기: {type(executor).__name__}\n'
+            f'가용 현금: {cash:,.0f}원'
+        )
+        send_telegram(msg)
+    except Exception as e:
+        logger.debug('텔레그램(사이클 시작) 발송 생략: %s', e)
 
     start = datetime.now()
     stats = {'executed': 0, 'hold': 0, 'skip': 0, 'error': 0, 'pending_buy': 0}
@@ -190,11 +390,23 @@ def run_cycle(mode):
     pending_buys = []  # Pass 1에서 수집한 매수 후보 (Pass 2에서 ADX 순 정렬 후 실행)
     cycle_error = None
 
+    # ----- BTC 거시 장세 필터: 1회 조회 후 이번 사이클 매수 허용 여부 결정 -----
+    is_global_bull_market = check_btc_global_trend(interval='day', count=50)
+    if not is_global_bull_market:
+        logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
+        try:
+            from trading_bot.monitor import send_telegram
+            send_telegram(
+                '🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.'
+            )
+        except Exception as e:
+            logger.debug('텔레그램(BTC 필터) 발송 생략: %s', e)
+
     # ----- Pass 1: 분석 및 매도 즉시 실행, 매수는 pending_buys에만 수집 -----
     try:
         for ticker in tickers:
             try:
-                out = analyze_ticker(ticker, executor, mode, defer_buy=True)
+                out = analyze_ticker(ticker, executor, mode, defer_buy=True, is_global_bull_market=is_global_bull_market)
                 status = out[0]
                 reason = out[1] if len(out) > 1 else None
                 data = out[2] if len(out) > 2 else None
@@ -215,15 +427,23 @@ def run_cycle(mode):
         cycle_error = e
         logger.exception('⚠️ 사이클 루프 중 예외 발생 (종료 로그는 아래에 출력): %s', str(e))
 
-    # ----- Pass 2: 매수 우선순위(ADX 내림차순) 정렬 후 가용 현금 한도 내 순차 매수 -----
-    # (1) 매도 완료 후 갱신된 가용 현금 조회 (2) pending_buys를 ADX 내림차순 정렬 (3) 정렬된 순으로
-    # estimated_spend <= remaining_cash 일 때만 place_order('buy') 호출, 실행 후 remaining_cash에서 차감
-    if not cycle_error and pending_buys:
+    # ----- Pass 2: 매수 우선순위(ADX 내림차순) 정렬 후 Regime 기반 동적 포지션 사이징으로 순차 매수 -----
+    # BTC 하락장이면 신규 매수 생략(매도만 수행).
+    if not cycle_error and pending_buys and is_global_bull_market:
         executor.refresh_balance_cache()
         remaining_cash = executor.get_available_cash()
+        total_equity = compute_total_account_equity(executor, tickers)
 
         # 정렬: ADX가 높을수록 추세가 강하므로 우선 매수 (내림차순)
         pending_buys_sorted = sorted(pending_buys, key=lambda x: float(x.get('adx', 0) or 0), reverse=True)
+        try:
+            from trading_bot.monitor import send_telegram
+            tickers_str = ', '.join(item['ticker'] for item in pending_buys_sorted[:10])
+            if len(pending_buys_sorted) > 10:
+                tickers_str += f' 외 {len(pending_buys_sorted) - 10}건'
+            send_telegram(f'🔔 매수 신호 발생: {len(pending_buys_sorted)}건 — {tickers_str}')
+        except Exception as e:
+            logger.debug('텔레그램(매수 신호) 발송 생략: %s', e)
 
         logger.info('')
         logger.info('📋 매수 대기 큐 정렬 결과 (ADX 추세 강도 높은 순, %s건):', len(pending_buys_sorted))
@@ -232,28 +452,80 @@ def run_cycle(mode):
         if len(pending_buys_sorted) > 20:
             logger.info('  ... 외 %s건', len(pending_buys_sorted) - 20)
 
-        # 가용 현금 한도 내에서만 순차 매수; 부족 시 해당 티커는 스킵
+        # 가용 현금 및 Regime 기반 동적 포지션 사이징: 소액 시드도 5,000원 이상이면 실행.
         for item in pending_buys_sorted:
             ticker = item['ticker']
-            estimated_spend = float(item.get('estimated_spend', 0) or 0)
             price = item.get('price')
             size_pct = item.get('size_pct', 0.02)
-            if estimated_spend <= 0 or price is None:
+            atr = item.get('atr', 0.0)
+            if price is None:
                 continue
-            # 업비트 최소 주문 금액(5,000원) 미만 시 API 거절 방지 — 스킵 후 continue
-            if estimated_spend < MIN_ORDER_KRW:
-                logger.info('[매수 스킵] %s — 최소 주문 금액(%s원) 미달로 매수 스킵 (예상비용 %.0f원)', ticker, MIN_ORDER_KRW, estimated_spend)
+
+            # Regime-Dependent Dynamic Position Sizing
+            final_buy_krw, risk_pct, sl_distance = calculate_dynamic_size(
+                total_equity=total_equity,
+                current_price=price,
+                atr=atr,
+                size_pct=size_pct,
+                is_global_bull_market=is_global_bull_market,
+            )
+            if final_buy_krw <= 0:
                 continue
-            if remaining_cash < estimated_spend:
-                logger.info('[매수 스킵] %s — 현금 부족으로 매수 스킵 (가용 %.0f원 < 필요 %.0f원, ADX=%.1f)', ticker, remaining_cash, estimated_spend, item.get('adx', 0))
+
+            # 실제 매수할당액 = 계산된 금액과 가용 현금 중 작은 값
+            alloc = min(final_buy_krw, remaining_cash)
+            # 업비트 최소 주문 금액(5,000원) 미만이면 스킵
+            if alloc < MIN_ORDER_KRW:
+                if base_size < MIN_ORDER_KRW:
+                    logger.info('[매수 스킵] %s — 최소 주문 금액(%s원) 미달로 매수 스킵 (예상비용 %.0f원)', ticker, MIN_ORDER_KRW, base_size)
+                    ai_logger.info('[SKIP] %s | REASON:최소주문미달 | Amt:%.0fKRW', ticker, base_size)
+                else:
+                    logger.info('[매수 스킵] %s — 가용 현금 부족으로 매수 스킵 (가용 %.0f원 < 5,000원)', ticker, remaining_cash)
+                    ai_logger.info('[SKIP] %s | REASON:현금부족 | Cash:%.0fKRW', ticker, remaining_cash)
                 continue
+            # ----- 중복 매수 방어: 이미 해당 티커를 5,000원 이상 보유 중이면 매수 스킵 -----
+            # 1시간봉 직전 완성 캔들 기준 신호라 동일 조건이 1시간 유지되어, 5분 주기 시 같은 티커에 반복 매수되는 버그 방지.
+            # 매도 후 찌꺼기 잔고(1~2원 등)만 있을 때는 5,000원 미만이므로 스킵하지 않고 정상 매수 허용.
+            hold_qty = executor.get_position_qty(ticker)
+            hold_value = (hold_qty or 0) * (price or 0)
+            if hold_value >= MIN_ORDER_KRW:
+                logger.info('[%s] 이미 포지션을 보유 중이므로 중복 매수 스킵', ticker)
+                ai_logger.info('[SKIP] %s | REASON:중복매수방지(이미보유) | HoldValue:%.0fKRW', ticker, hold_value)
+                continue
+            # alloc 금액만큼 매수하기 위해 비율 계산 (executor는 size_pct로 잔고 대비 비율 사용)
+            effective_pct = alloc / remaining_cash if remaining_cash > 0 else 0
             try:
-                executor.place_order('buy', price, size_pct=size_pct, ticker=ticker)
-                logger.info('✅ %s 매수 실행 (ADX=%.1f): 가격 %.0f, 비중 %.2f%%', ticker, item.get('adx', 0), price, size_pct * 100)
+                # Dynamic Sizing 로그 (AI 디버그)
+                ai_logger.info(
+                    "[Dynamic Sizing] %s | RegimeRisk: %.1f%% | ATR: %.2f | SL_Dist: %.2f | CalcKRW: %.0f | size_pct: %.2f",
+                    ticker,
+                    risk_pct * 100,
+                    float(atr or 0.0),
+                    sl_distance,
+                    final_buy_krw,
+                    float(size_pct or 0.0),
+                )
+                executor.place_order('buy', price, size_pct=effective_pct, ticker=ticker)
+                logger.info(
+                    '✅ %s 매수 실행 (ADX=%.1f): 가격 %.0f, 동적 배분 %.0f원 (RegimeRisk: %.1f%%, size_pct: %.2f)',
+                    ticker,
+                    item.get('adx', 0),
+                    price,
+                    alloc,
+                    risk_pct * 100,
+                    float(size_pct or 0.0),
+                )
+                ai_logger.info('[EXECUTE] %s | ACTION:BUY | Amt:%.0fKRW | ADX_Score:%.1f', ticker, alloc, float(item.get('adx', 0) or 0))
                 stats['executed'] = stats.get('executed', 0) + 1
-                remaining_cash -= estimated_spend
+                remaining_cash -= alloc
+                try:
+                    from trading_bot.monitor import send_telegram
+                    send_telegram(f'🟢 매수 체결: {ticker} @ {price:,.0f}원 (비중 {size_pct*100:.1f}%)')
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning('[오류] %s — 매수 주문 실행 실패: %s', ticker, str(e))
+                ai_logger.info('[ERROR] %s | ACTION:BUY | Msg:%s', ticker, str(e)[:100])
                 stats['error'] = stats.get('error', 0) + 1
 
     elapsed = (datetime.now() - start).total_seconds()
@@ -281,13 +553,20 @@ def run_cycle(mode):
             h.flush()
         except Exception:
             pass
+    for h in getattr(ai_logger, 'handlers', []):
+        try:
+            h.flush()
+        except Exception:
+            pass
 
 
 def main():
     args = parse_args()
-    mode = args.mode or os.environ.get('TRADING_MODE', 'paper')
+    # .env의 TRADING_MODE 우선 (스케줄러가 --mode paper로 호출해도 live 적용)
+    mode = os.environ.get('TRADING_MODE') or args.mode or 'paper'
     run_cycle(mode)
 
 
 if __name__ == '__main__':
     main()
+

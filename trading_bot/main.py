@@ -1,4 +1,5 @@
 
+
 from flask import Flask, request, jsonify
 import os, sys
 from pathlib import Path
@@ -563,3 +564,4 @@ if __name__ == '__main__':
     res, execu = run_paper_cycle()
     print('Backtest final value:', res['final_value'])
     print('Executor cash, positions:', execu.cash, execu.positions)
+

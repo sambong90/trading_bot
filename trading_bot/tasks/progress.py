@@ -1,3 +1,4 @@
+
 import json
 import time
 from pathlib import Path
@@ -26,3 +27,4 @@ def read_progress():
             return json.load(f)
     except Exception:
         return {'ts': time.time(), 'phase': 'idle', 'task': None, 'percent': 0, 'msg': None}
+

@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import json
 import pathlib
@@ -67,3 +68,4 @@ def update_phase(phase: str, status: str = 'in_progress', percent: int = None, r
 
 if __name__ == '__main__':
     print(update_phase('예시 단계', 'in_progress', None, ['작업1 완료'], ['다음 작업'], stages={'B.equity':{'weight':40,'progress':50},'B.metrics':{'weight':60,'progress':20}}))
+

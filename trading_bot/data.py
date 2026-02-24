@@ -1,3 +1,4 @@
+
 # ---------------------------------------------------------------------------
 # 라이브러리 설치: pip install pandas
 # (pandas-ta는 strategy.py에서 기술적 지표 계산용으로 사용)
@@ -16,18 +17,58 @@ from trading_bot.db import get_session
 from trading_bot.models import OHLCV
 
 
+# 거래대금 상위 N개만 순회 (TICKERS 미설정 시). API 호출 최소화·사이클 시간 단축용
+DEFAULT_TOP_N_BY_TRADE_PRICE = 60
+
+
 def get_all_krw_tickers(use_db_fallback=True):
-    """KRW 마켓 티커 목록 반환. env TICKERS(쉼표구분) 있으면 우선 사용, 없으면 pyupbit.get_tickers()에서 KRW 필터, 실패 시 DB ohlcv 테이블에서 ticker 목록 폴백."""
+    """KRW 마켓 티커 목록 반환.
+    - env TICKERS(쉼표구분) 있으면 우선 사용.
+    - 없으면 업비트 전체 KRW 티커 중 24h 거래대금(acc_trade_price_24h) 상위 60개만 반환 (API 1~2회로 배치 조회).
+    - 실패 시 DB ohlcv 테이블 폴백, 최종 폴백은 기본 4종목.
+    """
     import os
     env_tickers = os.environ.get('TICKERS', '').strip()
     if env_tickers:
         return [t.strip() for t in env_tickers.split(',') if t.strip().startswith('KRW-')]
+
+    top_n = DEFAULT_TOP_N_BY_TRADE_PRICE
     try:
-        all_tickers = pyupbit.get_tickers()
-        if all_tickers:
-            return [t for t in all_tickers if t.startswith('KRW-')]
+        top_n_env = os.environ.get('TICKER_TOP_N', '')
+        if top_n_env.isdigit():
+            top_n = max(1, min(200, int(top_n_env)))
     except Exception:
         pass
+
+    try:
+        # 1) KRW 마켓 티커 목록 (API 1회: /v1/market/all)
+        all_krw = pyupbit.get_tickers(fiat='KRW')
+        if not all_krw:
+            raise RuntimeError('get_tickers(fiat=KRW) returned empty')
+
+        # 2) 24h 거래대금 한 번에 조회: get_current_price(리스트, verbose=True) → /v1/ticker 배치 호출(최대 200개씩)
+        #    응답 리스트 항목에 acc_trade_price_24h 포함
+        raw_list = pyupbit.get_current_price(all_krw, verbose=True)
+        if not raw_list or not isinstance(raw_list, list):
+            raise RuntimeError('ticker batch response invalid')
+
+        # 3) acc_trade_price_24h 기준 내림차순 정렬 후 상위 top_n개
+        def _trade_price_24h(item):
+            try:
+                return float(item.get('acc_trade_price_24h') or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        sorted_list = sorted(raw_list, key=_trade_price_24h, reverse=True)
+        tickers = [x.get('market') for x in sorted_list[:top_n] if x.get('market')]
+        if tickers:
+            return tickers
+    except Exception as e:
+        if use_db_fallback:
+            pass
+        else:
+            raise
+
     if use_db_fallback:
         try:
             session = get_session()
@@ -35,7 +76,7 @@ def get_all_krw_tickers(use_db_fallback=True):
             session.close()
             tickers = [r[0] for r in rows if r[0] and r[0].startswith('KRW-')]
             if tickers:
-                return sorted(set(tickers))
+                return sorted(set(tickers))[:top_n]
         except Exception:
             pass
     return ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL']
@@ -305,3 +346,4 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
 
 def save_csv(df, path):
     df.to_csv(path, index=False)
+

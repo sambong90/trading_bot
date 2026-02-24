@@ -1,3 +1,4 @@
+
 def check_daily_loss(cash, starting_cash, daily_loss_limit_pct=0.03):
     draw = (starting_cash - cash) / starting_cash
     return draw <= daily_loss_limit_pct
@@ -23,3 +24,4 @@ def calculate_adjusted_position_size(
         'atr_trailing_multiplier': 2.0,
     }
     return base_size, risk_adjustments
+

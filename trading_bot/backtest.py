@@ -1,3 +1,4 @@
+
 import pandas as pd
 import math
 from trading_bot.tasks.state_updater import update_phase
@@ -148,3 +149,4 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
         print('Failed to write backtest to DB:', e)
 
     return {'final_value': final_value, 'trades': trades, 'equity_curve': equity_curve, 'metrics': metrics}
+

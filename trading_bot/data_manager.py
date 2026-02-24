@@ -1,7 +1,9 @@
+
 # OHLCV/지표 로드 헬퍼 (strategy에서 사용)
 # data.py 및 DB 기반 래퍼
 import pandas as pd
 import numpy as np
+from ta.volume import OnBalanceVolumeIndicator
 from trading_bot.data import fetch_ohlcv_from_db
 
 
@@ -85,8 +87,17 @@ def _adx(high, low, close, period=14):
     return adx.fillna(0)
 
 
-def compute_indicators(df, ema_short=12, ema_long=26, rsi_period=14, atr_period=14, bb_period=20, bb_std=2):
-    """OHLCV DataFrame에 EMA, RSI, ATR, ADX, BB 추가. time 컬럼 필수."""
+def compute_indicators(df, ema_short=None, ema_long=None, rsi_period=None, atr_period=None, bb_period=20, bb_std=2):
+    """OHLCV DataFrame에 EMA, RSI, ATR, ADX, BB 추가. time 컬럼 필수. None인 인자는 get_best_params()로 채움."""
+    if ema_short is None or ema_long is None or rsi_period is None or atr_period is None:
+        from trading_bot.param_manager import get_best_params
+        _p = get_best_params()
+    else:
+        _p = {}
+    ema_short = ema_short if ema_short is not None else _p.get('ema_short', 12)
+    ema_long = ema_long if ema_long is not None else _p.get('ema_long', 26)
+    rsi_period = rsi_period if rsi_period is not None else _p.get('rsi_period', 14)
+    atr_period = atr_period if atr_period is not None else _p.get('atr_period', 14)
     if df is None or len(df) < max(ema_long, rsi_period, bb_period) + 5:
         return None
     df = df.copy()
@@ -102,12 +113,29 @@ def compute_indicators(df, ema_short=12, ema_long=26, rsi_period=14, atr_period=
     df['atr'] = atr
     df['atr_raw'] = atr
     df['adx'] = _adx(high, low, close, atr_period)
+
     sma20 = close.rolling(bb_period).mean()
     std20 = close.rolling(bb_period).std().fillna(0)
     df['bb_middle'] = sma20
     df['bb_upper'] = sma20 + bb_std * std20
     df['bb_lower'] = sma20 - bb_std * std20
+
+    # Bollinger Band Width: 밴드 폭을 중앙선 대비 비율로 표현
+    with np.errstate(divide='ignore', invalid='ignore'):
+        bb_width = (df['bb_upper'] - df['bb_lower']) / df['bb_middle'].replace(0, np.nan)
+    df['bb_width'] = bb_width.replace([np.inf, -np.inf], np.nan).fillna(0)
+
     df['volume_ma'] = df['volume'].rolling(20).mean()
+
+    # OBV 및 OBV 이동평균 (20)
+    try:
+        indicator_obv = OnBalanceVolumeIndicator(close=df['close'], volume=df['volume'])
+        df['obv'] = indicator_obv.on_balance_volume()
+        df['obv_sma'] = df['obv'].rolling(window=20).mean()
+    except Exception:
+        df['obv'] = 0.0
+        df['obv_sma'] = 0.0
+
     df['sma_short'] = close.rolling(ema_short).mean()
     df['sma_long'] = close.rolling(ema_long).mean()
     return df
@@ -117,13 +145,21 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
     """OHLCV로 지표 계산 후 technical_indicators에 저장. df_ohlcv 없으면 DB에서 로드."""
     from trading_bot.db import get_session
     from trading_bot.models import TechnicalIndicator
+    from trading_bot.param_manager import get_best_params
 
     if df_ohlcv is None or len(df_ohlcv) == 0:
         df_ohlcv = load_ohlcv_from_db(ticker, timeframe, count=300)
     if df_ohlcv is None or len(df_ohlcv) < 30:
         return False
 
-    df = compute_indicators(df_ohlcv)
+    params = get_best_params()
+    df = compute_indicators(
+        df_ohlcv,
+        ema_short=params.get('ema_short', 12),
+        ema_long=params.get('ema_long', 26),
+        rsi_period=params.get('rsi_period', 14),
+        atr_period=params.get('atr_period', 14),
+    )
     if df is None:
         return False
 
@@ -159,7 +195,19 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
             bb_m = float(row.get('bb_middle') or 0)
             bb_u = float(row.get('bb_upper') or 0)
             vol_ma = float(row.get('volume_ma') or 0)
-            indicators = {'adx': adx, 'bb_lower': bb_l, 'bb_middle': bb_m, 'bb_upper': bb_u, 'atr_raw': atr_raw}
+            obv = _float_or_none(row.get('obv'))
+            obv_sma = _float_or_none(row.get('obv_sma'))
+            bb_width = _float_or_none(row.get('bb_width'))
+            indicators = {
+                'adx': adx,
+                'bb_lower': bb_l,
+                'bb_middle': bb_m,
+                'bb_upper': bb_u,
+                'atr_raw': atr_raw,
+                'obv': obv,
+                'obv_sma': obv_sma,
+                'bb_width': bb_width,
+            }
             existing = session.query(TechnicalIndicator).filter(
                 TechnicalIndicator.ticker == ticker,
                 TechnicalIndicator.timeframe == timeframe,
@@ -196,3 +244,4 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
         return False
     finally:
         session.close()
+
