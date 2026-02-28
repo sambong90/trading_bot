@@ -546,10 +546,6 @@ def run_cycle(mode):
     is_global_bull_market = check_btc_global_trend(interval='day', count=50)
     if not is_global_bull_market:
         logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
-        _notify(
-            '🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.',
-            level='CRITICAL',
-        )  # [IMPROVED]
 
     # ----- Pass 1: 분석 및 매도 즉시 실행, 매수는 pending_buys에만 수집 -----
     try:
