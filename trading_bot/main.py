@@ -29,6 +29,7 @@ def panic():
             new.append('ENABLE_AUTO_LIVE=0\n')
         with open(dotenv_path,'w') as f:
             f.writelines(new)
+        os.environ['ENABLE_AUTO_LIVE'] = '0'
         return jsonify({'ok':True,'msg':'AUTO LIVE disabled'})
     except Exception as e:
         return jsonify({'ok':False,'error':str(e)})

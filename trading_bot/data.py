@@ -292,37 +292,39 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
             pass
     update_phase('A - 데이터 수집', status='done', percent=100, recent_actions=[f'fetch complete rows={len(df)}'])
     # write to DB (upsert-like: try insert, ignore on conflict for sqlite simple approach)
-    # Try DB-specific upsert when possible to avoid IntegrityError noise.
+    session = None
+    conn = None
     try:
         session = get_session()
         engine = session.get_bind()
         dialect = engine.dialect.name
-        # If sqlite, use INSERT OR IGNORE for performance
         if dialect == 'sqlite':
             from sqlalchemy import text
             conn = engine.connect()
-            for _, row in df.iterrows():
-                ins = text("INSERT OR IGNORE INTO ohlcv (ticker, timeframe, ts, open, high, low, close, volume, source) VALUES (:ticker, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)")
-                params = {
-                    'ticker': ticker,
-                    'timeframe': interval,
-                    'ts': row['time'].to_pydatetime(),
-                    'open': float(row['open']),
-                    'high': float(row['high']),
-                    'low': float(row['low']),
-                    'close': float(row['close']),
-                    'volume': float(row['volume']),
-                    'source': 'upbit'
-                }
-                try:
-                    conn.execute(ins, params)
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    continue
-            conn.close()
+            try:
+                for _, row in df.iterrows():
+                    ins = text("INSERT OR IGNORE INTO ohlcv (ticker, timeframe, ts, open, high, low, close, volume, source) VALUES (:ticker, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)")
+                    params = {
+                        'ticker': ticker,
+                        'timeframe': interval,
+                        'ts': row['time'].to_pydatetime(),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row['volume']),
+                        'source': 'upbit'
+                    }
+                    try:
+                        conn.execute(ins, params)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        continue
+            finally:
+                conn.close()
+                conn = None
         else:
-            # generic fallback: attempt insert with flush and ignore duplicates
             from sqlalchemy.exc import IntegrityError
             for _, row in df.iterrows():
                 o = OHLCV(ticker=ticker, timeframe=interval, ts=row['time'].to_pydatetime(), open=float(row['open']), high=float(row['high']), low=float(row['low']), close=float(row['close']), volume=float(row['volume']), source='upbit')
@@ -332,14 +334,20 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
                 except IntegrityError:
                     session.rollback()
                     continue
-        session.commit()
+            session.commit()
     except Exception as e:
         print('db write failed', e)
     finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return df
 
 

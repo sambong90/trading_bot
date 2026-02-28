@@ -1,6 +1,25 @@
-requests
+# --- Upbit / Market Data ---
 pyupbit
+
+# --- HTTP ---
+requests
+
+# --- Data / Numerics ---
 pandas
 numpy
-python-dotenv
+
+# --- Technical Analysis ---
 ta
+
+# --- Scheduler ---
+APScheduler>=3.10.0
+
+# --- Database ORM ---
+SQLAlchemy>=2.0.0
+
+# --- Web Dashboard ---
+flask>=3.0.0
+plotly>=5.0.0
+
+# --- Env / Config ---
+python-dotenv

@@ -4,9 +4,9 @@ from trading_bot.tasks.state_updater import update_phase
 
 class PaperExecutor:
     def __init__(self, initial_cash=100000):
-        self.cash = initial_cash
+        self.cash = self._load_cash_from_db(initial_cash)  # [IMPROVED]
         # 티커별 포지션: { ticker: {'qty': float, 'avg_price': float}, ... }
-        self.positions = {}
+        self.positions = self._load_positions_from_db()  # [NEW]
         self.log = []
         # executor stages
         self.stages = {
@@ -16,6 +16,94 @@ class PaperExecutor:
             'C.logging': {'weight':10, 'progress':0}
         }
         update_phase('C - 실행기(Paper)', status='in_progress', stages=self.stages)
+
+    # [NEW] paper_state.json 우선 (qty 포함), 없으면 position_states 테이블 (avg_price만)
+    def _load_positions_from_db(self):
+        try:
+            from trading_bot.config import LOGS_DIR
+            import json
+            state_file = LOGS_DIR / 'paper_state.json'
+            if state_file.exists():
+                data = json.loads(state_file.read_text(encoding='utf-8'))
+                raw = data.get('positions', {})
+                if raw:
+                    return {
+                        t: {'qty': float(p.get('qty', 0)), 'avg_price': float(p.get('avg_price', 0))}
+                        for t, p in raw.items()
+                        if float(p.get('qty', 0)) > 0
+                    }
+        except Exception:
+            pass
+        try:
+            from trading_bot.db import get_session
+            from trading_bot.models import PositionState
+            session = get_session()
+            try:
+                rows = session.query(PositionState).all()
+                return {
+                    r.ticker: {'qty': 0.0, 'avg_price': float(r.avg_buy_price or 0)}
+                    for r in rows if r.avg_buy_price and r.avg_buy_price > 0
+                }
+            finally:
+                session.close()
+        except Exception:
+            pass
+        return {}
+
+    # [IMPROVED] paper_state 키로 저장된 가용 현금 복원
+    def _load_cash_from_db(self, default_cash: float) -> float:
+        try:
+            import json
+            from trading_bot.config import LOGS_DIR
+            state_file = LOGS_DIR / 'paper_state.json'
+            if state_file.exists():
+                data = json.loads(state_file.read_text(encoding='utf-8'))
+                return float(data.get('cash', default_cash))
+        except Exception:
+            pass
+        return default_cash
+
+    # [NEW] 현재 포지션·현금을 DB 및 파일에 저장 (place_order 완료 후 호출)
+    def _save_state_to_db(self):
+        try:
+            from trading_bot.db import get_session
+            from trading_bot.models import PositionState
+            session = get_session()
+            try:
+                for ticker, pos in self.positions.items():
+                    existing = session.query(PositionState).filter(PositionState.ticker == ticker).first()
+                    if existing:
+                        existing.avg_buy_price = pos.get('avg_price', 0.0)
+                        existing.stage = 0
+                    else:
+                        session.add(PositionState(
+                            ticker=ticker,
+                            avg_buy_price=pos.get('avg_price', 0.0),
+                            stage=0,
+                        ))
+                # 포지션 없어진 티커는 position_states에서 제거
+                for row in session.query(PositionState).all():
+                    if row.ticker not in self.positions:
+                        session.delete(row)
+                session.commit()
+            finally:
+                session.close()
+        except Exception:
+            pass
+        try:
+            import json
+            from trading_bot.config import LOGS_DIR
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            state_file = LOGS_DIR / 'paper_state.json'
+            state_file.write_text(json.dumps({
+                'cash': self.cash,
+                'positions': {
+                    t: {'qty': p['qty'], 'avg_price': p['avg_price']}
+                    for t, p in self.positions.items()
+                }
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception:
+            pass
 
     def _update_stage(self, name, progress):
         # internal helper to update a stage progress
@@ -41,19 +129,41 @@ class PaperExecutor:
         Paper 모드 주문. 티커별 포지션(qty, 평균단가)을 독립 관리.
         LiveExecutor와 시그니처 동일: side, price, size_pct, ticker.
         """
+        import logging
+        _logger = logging.getLogger(__name__)
+
         # validation
         self._update_stage('C.validation', 20)
         time.sleep(0.01)
         if side == 'buy':
-            qty = (self.cash * size_pct) / price if price else 0
-            cost = qty * price
-            if cost <= 0:
+            # --- 가격 유효성 검증 ---
+            if not price or price <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['유효하지 않은 가격'])
+                _logger.warning('[Paper] %s 매수 거부: 유효하지 않은 가격 (price=%s)', ticker, price)
+                return
+            # --- 가용 현금 검증 (잔고 마이너스 방지) ---
+            if self.cash <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['가용 현금 없음'])
+                _logger.warning('[Paper] %s 매수 거부: 가용 현금 없음 (cash=%.0f)', ticker, self.cash)
+                return
+            # 가용 현금 범위 내에서만 매수 (잔고 마이너스 절대 방지)
+            spend = min(self.cash * size_pct, self.cash)
+            if spend < 5000:  # 업비트 최소 주문 금액
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=[f'최소 주문 금액(5,000원) 미달: {spend:.0f}원'])
+                _logger.warning('[Paper] %s 매수 거부: 최소 주문 금액 미달 (spend=%.0f)', ticker, spend)
+                return
+            qty = spend / price
+            cost = spend  # spend 자체가 이미 cash 이하로 보장됨
+            if qty <= 0:
                 self._update_stage('C.validation', 100)
                 update_phase('C - 실행기(Paper)', status='failed', issues=['잘못된 주문금액'])
                 return
             self._update_stage('C.sim_fill', 30)
             filled = qty
-            self.cash -= filled * price
+            self.cash -= cost
             # 티커별 포지션 갱신 (평균 단가)
             if ticker not in self.positions:
                 self.positions[ticker] = {'qty': 0.0, 'avg_price': 0.0}
@@ -66,9 +176,16 @@ class PaperExecutor:
             self._update_stage('C.sim_fill', 100)
             self._update_stage('C.logging', 100)
             self._persist_order(rec, status='filled')
+            self._save_state_to_db()
             update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} buy executed price={price} qty={filled:.6f}'], stages=self.stages)
         elif side == 'sell':
             self._update_stage('C.validation', 50)
+            # --- 가격 유효성 검증 ---
+            if not price or price <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['매도 가격이 유효하지 않음'])
+                _logger.warning('[Paper] %s 매도 거부: 유효하지 않은 가격 (price=%s)', ticker, price)
+                return
             pos = self.positions.get(ticker, {'qty': 0.0, 'avg_price': 0.0})
             hold_qty = pos['qty']
             if hold_qty <= 0:
@@ -77,16 +194,24 @@ class PaperExecutor:
                 return
             self._update_stage('C.sim_fill', 50)
             sell_qty = hold_qty * size_pct if size_pct <= 1 else min(size_pct, hold_qty)
+            # --- 매도 수량이 보유 수량 초과 방지 ---
+            sell_qty = min(sell_qty, hold_qty)
+            if sell_qty <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} sell skipped: sell_qty=0'])
+                return
             proceeds = sell_qty * price
             self.cash += proceeds
             rec = {'time': datetime.utcnow().isoformat(), 'side': 'sell', 'price': price, 'qty': sell_qty, 'ticker': ticker}
+            rec['entry_price'] = pos.get('avg_price', 0.0)  # 연속 손실 계산용
             self.log.append(rec)
             pos['qty'] -= sell_qty
-            if pos['qty'] <= 0:
+            if pos['qty'] <= 1e-12:  # 부동소수점 찌꺼기 정리
                 del self.positions[ticker]
             self._update_stage('C.sim_fill', 100)
             self._update_stage('C.logging', 100)
             self._persist_order(rec, status='filled')
+            self._save_state_to_db()
             update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} sell executed price={price} qty={sell_qty:.6f}'], stages=self.stages)
 
     def refresh_balance_cache(self):
@@ -164,38 +289,134 @@ class LiveExecutor:
         except Exception as e:
             print('Failed to persist live order:', e)
 
+    # --- 하드 스탑로스 환경 변수 (기본값: -10%) ---
+    HARD_STOP_LOSS_PCT = None
+
+    def _get_hard_stop_loss_pct(self):
+        import os
+        try:
+            return float(os.environ.get('HARD_STOP_LOSS_PCT', '-10.0'))
+        except (TypeError, ValueError):
+            return -10.0
+
+    def check_hard_stop_loss(self, ticker, current_price):
+        """
+        하드 스탑로스 체크. 보유 포지션의 ROI가 HARD_STOP_LOSS_PCT 이하이면
+        즉시 전량 시장가 매도를 트리거.
+        반환: True면 스탑로스 발동(매도 완료), False면 정상.
+        """
+        import logging
+        _logger = logging.getLogger(__name__)
+        try:
+            avg_price = self.get_avg_buy_price(ticker)
+            qty = self.get_position_qty(ticker)
+            if qty <= 0 or avg_price <= 0 or current_price is None or current_price <= 0:
+                return False
+            roi = (current_price - avg_price) / avg_price * 100
+            threshold = self._get_hard_stop_loss_pct()
+            if roi <= threshold:
+                _logger.critical(
+                    '[HARD STOP-LOSS] %s ROI=%.1f%% <= %.1f%% | AvgPrice=%.0f CurrentPrice=%.0f | 전량 시장가 매도 실행',
+                    ticker, roi, threshold, avg_price, current_price,
+                )
+                self._notify_telegram(
+                    f'🚨 [HARD STOP-LOSS] {ticker}\nROI: {roi:.1f}% (임계값: {threshold}%)\n'
+                    f'평단가: {avg_price:,.0f}원 → 현재가: {current_price:,.0f}원\n전량 시장가 매도 실행'
+                )
+                # 전량 매도 (size_pct=1.0). 이 함수 내에서 place_order 재귀 방지를 위해 직접 API 호출
+                try:
+                    asset_currency = ticker.split('-')[1]
+                    resp = self.client.sell_market_order(ticker, qty)
+                    _logger.info('[HARD STOP-LOSS] %s 매도 주문 응답: %s', ticker, resp)
+                    import pandas as pd
+                    rec = {
+                        'time': pd.Timestamp.now().isoformat(),
+                        'side': 'sell', 'price': current_price, 'qty': qty,
+                        'ticker': ticker, 'reason': 'HARD_STOP_LOSS',
+                    }
+                    order_id = resp.get('uuid') if isinstance(resp, dict) else None
+                    self._persist_order({**rec, 'order_id': order_id}, status='stop_loss')
+                except Exception as e2:
+                    _logger.error('[HARD STOP-LOSS] %s 매도 실행 실패: %s', ticker, e2)
+                    self._notify_telegram(f'❌ HARD STOP-LOSS 매도 실패: {ticker} — {e2}')
+                return True
+        except Exception as e:
+            _logger.warning('[HARD STOP-LOSS] %s 체크 중 오류: %s', ticker, e)
+        return False
+
+    def cancel_all_open_orders(self, ticker=None):
+        """미체결 주문 전량 취소. ticker 지정 시 해당 티커만, None이면 전체."""
+        import logging
+        _logger = logging.getLogger(__name__)
+        if not self.enabled or not self.client:
+            return []
+        try:
+            import pyupbit
+            open_orders = self.client.get_order(ticker) if ticker else []
+            cancelled = []
+            for order in (open_orders or []):
+                try:
+                    uuid = order.get('uuid')
+                    if uuid and order.get('state') in ('wait', 'watch'):
+                        self.client.cancel_order(uuid)
+                        cancelled.append(uuid)
+                        _logger.info('[주문 취소] %s uuid=%s', ticker or 'ALL', uuid)
+                except Exception as e:
+                    _logger.warning('[주문 취소 실패] uuid=%s: %s', order.get('uuid'), e)
+            if cancelled:
+                self._notify_telegram(f'🗑️ 미체결 주문 {len(cancelled)}건 취소 완료 ({ticker or "전체"})')
+            return cancelled
+        except Exception as e:
+            _logger.warning('[주문 취소] 조회 실패: %s', e)
+            return []
+
     def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC'):
         """
         실제 거래 주문 실행 (개선된 버전)
-        
+
         Parameters:
         - side: 'buy' or 'sell'
         - price: 주문 가격
         - size_pct: 포지션 크기 비율
         - ticker: 거래할 코인 티커 (하드코딩 제거)
         """
-        import os, pandas as pd
+        import os, pandas as pd, logging
+        _logger = logging.getLogger(__name__)
         if not self.enabled:
             raise RuntimeError('LiveExecutor not enabled. Set LIVE_MODE=1 and LIVE_CONFIRM="I CONFIRM LIVE" and valid keys.')
-        
+
         # basic validation
         if side not in ('buy','sell'):
             raise ValueError('side must be buy or sell')
-        
+
         if not ticker or not ticker.startswith('KRW-'):
             raise ValueError(f'Invalid ticker: {ticker}. Must be in format KRW-XXX')
-        
+
         # 환경 변수 로드
         self._load_env_flags()
-        
+
         # ENABLE_AUTO_LIVE 플래그 확인 (실제 주문 실행 여부)
         if not self.ENABLE_AUTO_LIVE:
             raise RuntimeError('ENABLE_AUTO_LIVE=0 - 자동 라이브 거래가 비활성화되어 있습니다. 실제 주문을 실행하지 않습니다.')
-        
-        # get KRW balance for buys or asset balance for sells as needed
-        # place limit order for safety
+
+        # --- 슬리피지 방어: 주문 전 실시간 가격 검증 (BTC 급변 방어) ---
         try:
-            # wrap network calls with simple retry/backoff
+            import pyupbit
+            realtime_price = pyupbit.get_current_price(ticker)
+            if realtime_price and price and price > 0:
+                slippage = abs(realtime_price - price) / price
+                if slippage > 0.03:  # 3% 이상 괴리 시 주문 거부
+                    msg = (f'슬리피지 방어: {ticker} 참조가격({price:,.0f}) vs '
+                           f'실시간({realtime_price:,.0f}) 괴리 {slippage*100:.1f}% > 3%')
+                    _logger.warning('[SLIPPAGE GUARD] %s', msg)
+                    self._notify_telegram(f'⚠️ {msg}')
+                    raise RuntimeError(msg)
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # 실시간 가격 조회 실패 시 주문 계속 진행
+
+        try:
             import time
             max_retries = 3
             for attempt in range(1, max_retries+1):
@@ -208,96 +429,111 @@ class LiveExecutor:
                             if b.get('currency') == 'KRW':
                                 krw_bal = float(b.get('balance') or 0)
                                 break
-                        
+
+                        # 잔고 부족 사전 차단
+                        if krw_bal < 5000:
+                            raise ValueError(f'KRW 잔고 부족: {krw_bal:,.0f}원')
+
                         # 포지션 크기 제한 확인 (spend = 사용할 원화 총액)
                         spend_float = krw_bal * min(size_pct, self.MAX_POSITION_PCT)
-                        
+
                         # daily loss guard
                         try:
                             if self._daily_loss_exceeded(additional_spend=spend_float):
                                 raise RuntimeError('Daily loss limit exceeded, blocking new buys')
+                        except RuntimeError:
+                            raise
                         except Exception:
                             pass
-                        
+
                         # 최소 주문 금액 확인 (업비트 최소 주문 typically 5000 KRW)
+                        min_total = 5000
                         try:
                             import requests
                             r = requests.get(f'https://api.upbit.com/v1/orders/chance?market={ticker}', timeout=5)
                             data = r.json()
-                            min_total = float(data.get('market', {}).get('bid', {}).get('min_total') or 
-                                            data.get('market', {}).get('ask', {}).get('min_total') or 1000)
+                            min_total = float(data.get('market', {}).get('bid', {}).get('min_total') or
+                                            data.get('market', {}).get('ask', {}).get('min_total') or 5000)
                         except Exception:
-                            min_total = 5000
-                        
+                            pass
+
                         if spend_float < min_total:
                             raise ValueError(f'주문 금액이 최소 주문 금액({min_total}원)보다 작습니다.')
-                        
-                        # 시장가 매수: 업비트 API는 원화 총액(spend)만 받음. 지정가 미체결 방지.
-                        spend = round(spend_float)  # KRW 정수 원 단위
+
+                        spend = round(spend_float)
                         resp = self.client.buy_market_order(ticker, spend)
-                        
-                        # Telegram 알림 (시장가이므로 체결가 대신 주문 원화 표시)
+
                         self._notify_telegram(f'🟢 시장가 매수: {ticker}, 주문 금액: {spend:,.0f}원')
-                        
+
                     else:
-                        # for sell, we need the asset balance
                         bal_list = self.client.get_balances()
                         asset_bal = 0.0
                         asset_currency = ticker.split('-')[1]
-                        
+
                         for b in bal_list:
                             if b.get('currency') == asset_currency:
                                 asset_bal = float(b.get('balance') or 0)
                                 break
-                        
+
                         if asset_bal <= 0:
                             raise ValueError(f'{asset_currency} 잔고가 없습니다.')
-                        
-                        sell_qty = asset_bal * size_pct if size_pct <= 1 else size_pct
+
+                        sell_qty = asset_bal * size_pct if size_pct <= 1 else min(size_pct, asset_bal)
                         if sell_qty <= 0:
                             raise ValueError('매도 수량이 0입니다.')
-                        
+
                         resp = self.client.sell_market_order(ticker, sell_qty)
-                        
-                        # Telegram 알림
+
                         self._notify_telegram(f'🔴 매도 주문: {ticker}, 수량: {sell_qty:.6f}')
-                    
-                    # parse response: pyupbit returns dict with 'uuid' or similar
+
+                    # parse response
                     order_id = None
                     if isinstance(resp, dict):
-                        order_id = resp.get('uuid') or resp.get('id') or resp.get('uuid')
-                    
-                    # buy: 시장가라 체결가/수량은 응답 기준. 로깅용으로 price=참고가, qty=예상 수량
+                        order_id = resp.get('uuid') or resp.get('id')
+                        # API 에러 응답 감지
+                        if resp.get('error'):
+                            raise RuntimeError(f"Upbit API error: {resp.get('error')}")
+
                     rec = {
-                        'time': pd.Timestamp.now().isoformat(), 
-                        'side': side, 
-                        'price': price, 
+                        'time': pd.Timestamp.now().isoformat(),
+                        'side': side,
+                        'price': price,
                         'qty': (spend / price) if (side == 'buy' and price) else sell_qty,
                         'ticker': ticker
                     }
                     if side == 'buy':
-                        rec['spend'] = spend  # 시장가 매수 시 실제 주문 원화
-                    
-                    # persist order with order_id if available
+                        rec['spend'] = spend
+
                     try:
                         self._persist_order({**rec, 'order_id': order_id}, status='submitted')
                     except Exception:
                         pass
-                    
+
                     return resp
+                except (RuntimeError, ValueError) as e:
+                    # 비즈니스 로직 에러는 재시도하지 않고 즉시 전파
+                    raise
                 except Exception as e:
                     error_msg = f'Live order attempt {attempt} failed: {e}'
-                    print(error_msg)
+                    _logger.warning(error_msg)
                     self._notify_telegram(f'⚠️ {error_msg}')
-                    
-                    if attempt < max_retries:
+
+                    # Rate Limit (429) 감지 시 더 긴 대기
+                    err_str = str(e).lower()
+                    if '429' in err_str or 'rate limit' in err_str or 'too many' in err_str:
+                        wait = min(60, 5 * (2 ** attempt))
+                        _logger.warning('[Rate Limit] %s초 대기 후 재시도...', wait)
+                        time.sleep(wait)
+                    elif attempt < max_retries:
                         time.sleep(2 ** attempt)
-                        continue
-                    else:
+
+                    if attempt >= max_retries:
+                        # 최종 실패 시 해당 티커 미체결 주문 정리
+                        self.cancel_all_open_orders(ticker)
                         raise
         except Exception as e:
             error_msg = f'Live order failed: {e}'
-            print(error_msg)
+            _logger.error(error_msg)
             self._notify_telegram(f'❌ {error_msg}')
             raise
 

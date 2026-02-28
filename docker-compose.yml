@@ -1,0 +1,64 @@
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # M4 (ARM64) 로컬 빌드: 플랫폼 명시로 Rosetta 에뮬레이션 방지
+      # 클라우드(amd64) 배포 시 주석 해제 → linux/amd64
+      # platforms:
+      #   - linux/amd64
+    image: trading-bot:local
+    container_name: trading-bot
+
+    restart: unless-stopped
+
+    # ── 환경 변수 ─────────────────────────────────────────────────────
+    # trading_bot/.env 에서 민감 정보(API 키, Telegram 토큰 등) 로드
+    # .env는 .dockerignore로 이미지에 포함되지 않음 — 런타임 주입만
+    env_file:
+      - trading_bot/.env
+    environment:
+      # .env 값 덮어쓰기가 필요한 컨테이너 전용 설정
+      - TRADING_MODE=paper
+      - ENABLE_AUTO_TRADING=0
+      # DB 경로: 컨테이너 내 절대 경로로 명시 (볼륨 마운트와 일치)
+      - DB_URL=sqlite:////app/trading_bot/db/trading_bot.db
+
+    # ── 볼륨 마운트 (퍼시스턴스) ──────────────────────────────────────
+    # 컨테이너 재생성 후에도 DB와 로그가 보존됨
+    volumes:
+      # SQLite DB — 호스트의 ./trading_bot/db/ ↔ 컨테이너의 /app/trading_bot/db/
+      - ./trading_bot/db:/app/trading_bot/db
+      # 로그·캐시·PID 파일 — 호스트에서 실시간 조회 가능
+      - ./trading_bot/logs:/app/trading_bot/logs
+
+    # ── 헬스체크 ──────────────────────────────────────────────────────
+    # scheduler_heartbeat.json 갱신 여부로 봇 생존 확인 (5분 주기 heartbeat 기준)
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - |
+          import json, time, sys
+          f = '/app/trading_bot/logs/scheduler_heartbeat.json'
+          try:
+              d = json.load(open(f))
+              ts = d.get('ts', '')
+              from datetime import datetime
+              last = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+              diff = (datetime.now() - last).total_seconds()
+              sys.exit(0 if diff < 600 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    # ── 로깅 ──────────────────────────────────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

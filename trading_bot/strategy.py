@@ -18,6 +18,22 @@ def _json_default(obj):
     raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
 
 
+def _candle_bucket_seconds(timeframe: str) -> int:
+    """Convert timeframe string to candle bucket size in seconds for duplicate-signal detection."""
+    if not timeframe:
+        return 3600
+    tf = str(timeframe).strip().lower()
+    if tf == 'day':
+        return 86400
+    if tf.startswith('minute'):
+        try:
+            n = int(tf.replace('minute', '').strip() or 60)
+            return max(60, n * 60)
+        except ValueError:
+            pass
+    return 3600
+
+
 def sma(series, window):
     return series.rolling(window).mean()
 
@@ -99,10 +115,27 @@ def load_cached_indicators(ticker: str, timeframe: str, count: int = 200) -> pd.
                     row['bb_width'] = indicators['bb_width']
             
             data.append(row)
-        
+
         df = pd.DataFrame(data)
-        if len(df) > 0:
-            df['time'] = pd.to_datetime(df['time'])
+        if len(df) == 0:
+            return df
+        df['time'] = pd.to_datetime(df['time'])
+        # Merge OHLCV volume so vol_ratio is meaningful (TechnicalIndicator has no volume)
+        try:
+            from trading_bot.data_manager import load_ohlcv_from_db
+            df_ohlcv = load_ohlcv_from_db(ticker, timeframe, count=count)
+            if df_ohlcv is not None and not df_ohlcv.empty and 'volume' in df_ohlcv.columns and 'time' in df_ohlcv.columns:
+                ohlcv_sub = df_ohlcv[['time', 'volume']].copy()
+                ohlcv_sub['time'] = pd.to_datetime(ohlcv_sub['time'])
+                df['_time'] = pd.to_datetime(df['time'])
+                if hasattr(df['_time'].dtype, 'tz') and df['_time'].dt.tz is not None:
+                    df['_time'] = df['_time'].dt.tz_localize(None)
+                if hasattr(ohlcv_sub['time'].dtype, 'tz') and ohlcv_sub['time'].dt.tz is not None:
+                    ohlcv_sub['time'] = ohlcv_sub['time'].dt.tz_localize(None)
+                df = df.merge(ohlcv_sub.rename(columns={'time': '_time'}), on='_time', how='left')
+                df.drop(columns=['_time'], inplace=True)
+        except Exception:
+            pass
         return df
     except Exception as e:
         print(f'⚠️ 캐싱된 지표 로드 실패 ({ticker}, {timeframe}): {e}')
@@ -120,6 +153,7 @@ def generate_comprehensive_signal_with_logging(
     position_qty: float = 0.0,
     current_roi: float = 0.0,
     scale_out_stage: int = 0,
+    avg_buy_price: float = 0.0,  # [NEW] ATR Scale-Out 기준 계산용
 ) -> Dict:
     """
     종합 신호 판단 및 상세 로깅
@@ -158,7 +192,27 @@ def generate_comprehensive_signal_with_logging(
         from trading_bot.models import Signal, AnalysisResult
         from trading_bot.risk import calculate_adjusted_position_size
         from trading_bot.data_manager import load_ohlcv_from_db, load_higher_timeframe_indicators
+        from trading_bot.config import (
+            RSI_BUY_MIN, RSI_BUY_MAX, RSI_SELL_MIN,
+            SCALE_OUT_ATR_MULT_1, SCALE_OUT_ATR_MULT_2,
+            SCALE_OUT_ROI_FALLBACK_1, SCALE_OUT_ROI_FALLBACK_2,
+            VOL_SCALE_HIGH, VOL_SCALE_MID,
+        )
         import json
+
+        # [IMPROVED] ATR 기반 동적 Scale-Out (폴백: ROI 고정값)
+        def _should_scale_out(stage_target, avg_buy, cur_price, atr_v, so_stage):
+            if so_stage >= stage_target:
+                return False
+            if avg_buy and avg_buy > 0 and atr_v and atr_v > 0:
+                mult = SCALE_OUT_ATR_MULT_1 if stage_target == 1 else SCALE_OUT_ATR_MULT_2
+                target_price = avg_buy + atr_v * mult
+                return cur_price >= target_price
+            if avg_buy and avg_buy > 0:
+                roi = (cur_price - avg_buy) / avg_buy * 100
+                th = SCALE_OUT_ROI_FALLBACK_1 if stage_target == 1 else SCALE_OUT_ROI_FALLBACK_2
+                return roi >= th
+            return False
         
         # 1) 캐싱된 지표 로드
         df_indicators = load_cached_indicators(ticker, timeframe, count=200)
@@ -197,26 +251,34 @@ def generate_comprehensive_signal_with_logging(
             else:
                 current_price = 0.0
         
-        # 2) Regime 판단 — 완성 봉(closed_candle, prev_closed_candle) 기준
+        # 2) Regime 판단 — ADX, slope, BB width (squeeze) to reduce whipsaws; add transition
         adx = float(closed_candle.get('adx', 0))
         adx_prev = float(prev_closed_candle.get('adx', 0))
         adx_slope = adx - adx_prev
-        if adx > adx_trend_threshold:
+        bb_width = float(closed_candle.get('bb_width', 0) or 0)
+        # thresholds: squeeze = small BB width; avoid calling trend in low-vol chop
+        BB_SQUEEZE_MAX = 0.05
+        BB_TREND_MIN = 0.02
+        ADX_NEAR_MARGIN = 3.0
+        if adx <= adx_trend_threshold and bb_width > 0 and bb_width < BB_SQUEEZE_MAX:
+            regime = 'range'
+        elif adx > adx_trend_threshold and bb_width >= BB_TREND_MIN:
             if adx_slope < 0:
                 regime = 'weakening_trend'
             else:
                 regime = 'trend'
         else:
-            regime = 'range'
-        
+            regime = 'transition'
+        decision_reason_parts = []
+        decision_reason_parts.append(f"Regime:{regime} (ADX:{adx:.1f} slope:{adx_slope:+.1f} bb_width:{bb_width:.3f})")
+
         # 3) 신호 생성: EMA/크로스는 완성 봉 기준, BB 터치는 closed_candle의 BB + 실시간 current_price
         # Scale-Out 및 정규 매도 시 sell_size_pct, next_scale_out_stage (반환용)
         signal = 'hold'
         sell_size_pct = 1.0
         buy_size_pct = 1.0
         next_scale_out_stage = None
-        decision_reason_parts = []
-        
+
         ema_short = closed_candle.get('ema_short', 0)
         ema_long = closed_candle.get('ema_long', 0)
         rsi = closed_candle.get('rsi', 50)
@@ -224,11 +286,31 @@ def generate_comprehensive_signal_with_logging(
         current_volume = float(closed_candle.get('volume', 0))
         vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
         vol_ratio = current_volume / vol_ma if vol_ma > 0 else 0.0
+
+        def volume_ok(vol_ratio_val, regime_name, is_bull, weakening=False, decoupling=False):
+            """Single volume gate: returns (passed, required_threshold). Use same vol_ratio everywhere."""
+            if decoupling:
+                req = 1.5
+                return (vol_ratio_val >= req, req)
+            if weakening:
+                req = 1.2
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'trend':
+                req = 0.8 if is_bull else 1.0
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'range':
+                req = 0.8
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'transition':
+                req = 1.0
+                return (vol_ratio_val >= req, req)
+            return (True, 0.0)
+
         # 볼린저: 완성 봉의 밴드 값 사용. 터치 여부는 실시간 current_price로 판단(기민한 반응)
         bb_lower = closed_candle.get('bb_lower', 0)
         bb_upper = closed_candle.get('bb_upper', 0)
         bb_middle = closed_candle.get('bb_middle', 0)
-        bb_width = float(closed_candle.get('bb_width', 0) or 0)
+        # bb_width already set in regime block above
         # OBV 기반 Smart Money 흐름
         obv = float(closed_candle.get('obv', 0) or 0)
         obv_sma = float(closed_candle.get('obv_sma', 0) or 0)
@@ -255,9 +337,24 @@ def generate_comprehensive_signal_with_logging(
                 atr_val = float(_atr_raw)
         except (TypeError, ValueError):
             pass
+        # [IMPROVED] 수익 구간별 ATR 배수로 트레일링 스탑 계산
+        try:
+            from trading_bot.config import TS_MULT_LOW, TS_MULT_MID, TS_MULT_HIGH
+        except Exception:
+            TS_MULT_LOW, TS_MULT_MID, TS_MULT_HIGH = 3.0, 2.0, 1.5
+        if current_roi >= 15.0:
+            ts_mult = TS_MULT_HIGH
+        elif current_roi >= 5.0:
+            ts_mult = TS_MULT_MID
+        else:
+            ts_mult = TS_MULT_LOW
         trailing_stop_price = None
         if recent_highest is not None and atr_val is not None and atr_val > 0:
-            trailing_stop_price = recent_highest - (atr_val * 2.5)
+            trailing_stop_price = recent_highest - (atr_val * ts_mult)
+            if position_qty > 0:
+                decision_reason_parts.append(
+                    f'TrailingStop: {trailing_stop_price:.0f} (최고가{recent_highest:.0f} - ATR×{ts_mult})'
+                )
 
         # ----- Whale Accumulation (Smart Money) Detection -----
         accumulation_mode = False
@@ -275,17 +372,23 @@ def generate_comprehensive_signal_with_logging(
             )
         
         # 추세장: Scale-Out(25-25-50) → ATR Trailing Stop → EMA 골든/데드 크로스
+        avg_buy = float(avg_buy_price or 0.0)
+        atr_for_scale = float(atr_val or 0.0) if atr_val is not None else 0.0
         if regime == 'trend':
-            if position_qty > 0 and current_roi >= 10.0 and scale_out_stage < 2:
+            if position_qty > 0 and _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
-                sell_size_pct = 0.33  # 25% of original ≈ 1/3 of remaining 75%
+                sell_size_pct = 0.33
                 next_scale_out_stage = 2
-                decision_reason_parts.append("Scale-Out Stage 2: ROI >= 10.0%, taking 25% profit.")
-            elif position_qty > 0 and current_roi >= 5.0 and scale_out_stage < 1:
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 2: ATR 배수 {SCALE_OUT_ATR_MULT_2}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_2}%)'
+                )
+            elif position_qty > 0 and _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
-                sell_size_pct = 0.25  # 25% of original position
+                sell_size_pct = 0.25
                 next_scale_out_stage = 1
-                decision_reason_parts.append("Scale-Out Stage 1: ROI >= 5.0%, taking 25% profit.")
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 1: ATR 배수 {SCALE_OUT_ATR_MULT_1}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_1}%)'
+                )
             elif current_price is not None and current_price > 0 and trailing_stop_price is not None and current_price < trailing_stop_price:
                 signal = 'sell'
                 sell_size_pct = 1.0
@@ -298,28 +401,20 @@ def generate_comprehensive_signal_with_logging(
                     prev_ema_short = 0
                 if pd.isna(prev_ema_long):
                     prev_ema_long = 0
-                if ema_short > ema_long and prev_ema_short <= prev_ema_long:
+                # [IMPROVED] RSI가 과매도 탈출~과매수 미만 구간일 때만 매수
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
                     if not mtf_blocked:
-                        current_volume = float(closed_candle.get('volume', 0))
-                        vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                        required_vol_ratio = 0.8 if is_global_bull_market else None
-                        if required_vol_ratio is not None:
-                            if current_volume >= vol_ma * required_vol_ratio:
-                                signal = 'buy'
-                                decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스')
-                                decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) > 장기({ema_long:.0f})')
-                                decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {vol_ratio:.1f}x >= {required_vol_ratio}x)')
-                                if rsi < 70:
-                                    decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 아님')
-                            else:
-                                signal = 'hold'
-                                decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < {required_vol_ratio}x)')
-                        else:
+                        ok, req = volume_ok(vol_ratio, 'trend', is_global_bull_market, weakening=False, decoupling=False)
+                        if ok:
                             signal = 'buy'
                             decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스')
                             decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) > 장기({ema_long:.0f})')
-                            if rsi < 70:
-                                decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 아님')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            signal = 'hold'
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 elif ema_short < ema_long and prev_ema_short >= prev_ema_long:
@@ -329,16 +424,20 @@ def generate_comprehensive_signal_with_logging(
                     decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 데드크로스')
                     decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) < 장기({ema_long:.0f})')
         elif regime == 'weakening_trend':
-            if position_qty > 0 and current_roi >= 10.0 and scale_out_stage < 2:
+            if position_qty > 0 and _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
                 sell_size_pct = 0.33
                 next_scale_out_stage = 2
-                decision_reason_parts.append("Scale-Out Stage 2: ROI >= 10.0%, taking 25% profit.")
-            elif position_qty > 0 and current_roi >= 5.0 and scale_out_stage < 1:
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 2: ATR 배수 {SCALE_OUT_ATR_MULT_2}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_2}%)'
+                )
+            elif position_qty > 0 and _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
                 sell_size_pct = 0.25
                 next_scale_out_stage = 1
-                decision_reason_parts.append("Scale-Out Stage 1: ROI >= 5.0%, taking 25% profit.")
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 1: ATR 배수 {SCALE_OUT_ATR_MULT_1}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_1}%)'
+                )
             elif current_price is not None and current_price > 0 and trailing_stop_price is not None and current_price < trailing_stop_price:
                 signal = 'sell'
                 sell_size_pct = 1.0
@@ -351,22 +450,18 @@ def generate_comprehensive_signal_with_logging(
                     prev_ema_short = 0
                 if pd.isna(prev_ema_long):
                     prev_ema_long = 0
-                if ema_short > ema_long and prev_ema_short <= prev_ema_long:
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
                     if not mtf_blocked:
-                        current_volume = float(closed_candle.get('volume', 0))
-                        vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                        required_vol_ratio = 1.2 if is_global_bull_market else None
-                        if required_vol_ratio is not None:
-                            if current_volume >= vol_ma * required_vol_ratio:
-                                signal = 'buy'
-                                decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스, 비중 50%')
-                                decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {vol_ratio:.1f}x >= {required_vol_ratio}x)')
-                            else:
-                                signal = 'hold'
-                                decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < {required_vol_ratio}x)')
-                        else:
+                        ok, req = volume_ok(vol_ratio, 'weakening_trend', is_global_bull_market, weakening=True, decoupling=False)
+                        if ok:
                             signal = 'buy'
                             decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스, 비중 50%')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            signal = 'hold'
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 elif ema_short < ema_long and prev_ema_short >= prev_ema_long:
@@ -374,14 +469,54 @@ def generate_comprehensive_signal_with_logging(
                     sell_size_pct = 1.0
                     next_scale_out_stage = 0
                     decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 데드크로스')
-        else:
-            # 횡보장: 매수=BB하단 터치(실시간), 매도=캔들 고가가 BB상단 강하게 터치한 이벤트만 (무한 sell 방지)
-            if current_price and current_price > 0 and bb_lower and bb_upper and bb_upper > bb_lower:
-                if current_price <= bb_lower * 1.01:
-                    if not mtf_blocked:
+        elif regime == 'transition':
+            # Default hold in transition; allow only strong confirmation with reduced size
+            if position_qty > 0:
+                if _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
+                    signal = 'sell'
+                    sell_size_pct = 0.33
+                    next_scale_out_stage = 2
+                    decision_reason_parts.append("Scale-Out Stage 2 (transition)")
+                elif _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
+                    signal = 'sell'
+                    sell_size_pct = 0.25
+                    next_scale_out_stage = 1
+                    decision_reason_parts.append("Scale-Out Stage 1 (transition)")
+                elif current_price and trailing_stop_price and current_price < trailing_stop_price:
+                    signal = 'sell'
+                    sell_size_pct = 1.0
+                    next_scale_out_stage = 0
+            # Optional: allow buy in transition only with strong confirmation and reduced size
+            elif (ema_short or ema_long) and not (pd.isna(ema_short) or pd.isna(ema_long)):
+                prev_ema_short = prev_closed_candle.get('ema_short', 0)
+                prev_ema_long = prev_closed_candle.get('ema_long', 0)
+                if pd.isna(prev_ema_short): prev_ema_short = 0
+                if pd.isna(prev_ema_long): prev_ema_long = 0
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long and not mtf_blocked
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
+                    ok, req = volume_ok(vol_ratio, 'transition', is_global_bull_market, weakening=False, decoupling=False)
+                    if ok:
                         signal = 'buy'
-                        decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) BB하단 터치(완성봉 밴드+실시간가격)')
-                        decision_reason_parts.append(f'현재가({current_price:.0f}) <= 하단({bb_lower:.0f})')
+                        buy_size_pct = 0.5
+                        decision_reason_parts.append(f'Transition EMA 골든크로스 (비중 50%, Vol {vol_ratio:.1f}x >= {req}x)')
+                        decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                    elif not ok:
+                        decision_reason_parts.append(f'Transition: Volume filter (Vol {vol_ratio:.1f}x < req {req}x)')
+        else:
+            # 횡보장(range): 매수=BB하단 터치 + RSI 필터 + volume gate
+            if current_price and current_price > 0 and bb_lower and bb_upper and bb_upper > bb_lower:
+                # [IMPROVED] BB 하단 터치 + RSI 필터
+                if current_price <= bb_lower * 1.01 and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX:
+                    if not mtf_blocked:
+                        ok, req = volume_ok(vol_ratio, 'range', is_global_bull_market, weakening=False, decoupling=False)
+                        if ok:
+                            signal = 'buy'
+                            decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) BB하단 터치(완성봉 밴드+실시간가격)')
+                            decision_reason_parts.append(f'현재가({current_price:.0f}) <= 하단({bb_lower:.0f})')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 else:
@@ -397,6 +532,10 @@ def generate_comprehensive_signal_with_logging(
                             decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) 완성봉 고가 BB상단 터치 이벤트')
                             decision_reason_parts.append(f'고가({closed_high:.0f}) >= 상단({bb_upper:.0f}), 직전봉 미터치')
                     # (기존: current_price >= bb_upper 상태만으로 매도 → 제거하여 반복 sell 방지)
+
+        # [NEW] RSI 과매수 구간 매도 강화 (보유 포지션 있고, 이미 sell 신호 발생 시)
+        if signal == 'sell' and position_qty > 0 and rsi >= RSI_SELL_MIN:
+            decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 매도 강화')
         
         # 어떤 신호가 나왔든, 디버깅을 위해 마지막에 항상 볼륨 비율 정보를 부가
         decision_reason_parts.append(f'[Vol: {vol_ratio:.1f}x]')
@@ -418,44 +557,62 @@ def generate_comprehensive_signal_with_logging(
         if accumulation_mode and position_size > 0:
             position_size = position_size * 0.5
         
-        # 약세 추세장일 경우 포지션 크기 추가 축소 (50%)
-        if regime == 'weakening_trend' and signal == 'buy':
+        # 약세 추세장 또는 transition 매수 시 포지션 크기 축소 (50%)
+        if (regime == 'weakening_trend' or regime == 'transition') and signal == 'buy':
             position_size = position_size * 0.5
             risk_adjustments['weakening_trend_reduction'] = True
             risk_adjustments['position_size_multiplier'] = risk_adjustments.get('position_size_multiplier', 1.0) * 0.5
 
-        # BTC 거시 장세 필터 + 경주마(디커플링) 예외: 하락장에서도 ADX>=40 초강세는 예외 매수(비중 50%). 디커플링 시 볼륨 1.5x 필수.
+        # [NEW] 변동성 기반 포지션 자동 축소
+        try:
+            atr_series = df_indicators['atr'].dropna().tail(20)
+            avg_atr_20 = float(atr_series.mean()) if len(atr_series) >= 5 else 0.0
+        except Exception:
+            avg_atr_20 = 0.0
+        vol_scale_multiplier = 1.0
+        if avg_atr_20 > 0 and atr_val and atr_val > 0:
+            atr_ratio = atr_val / avg_atr_20
+            if atr_ratio >= VOL_SCALE_HIGH:
+                vol_scale_multiplier = 0.5
+                decision_reason_parts.append(f'변동성 급등(ATR {atr_ratio:.1f}x) → 포지션 50% 축소')
+            elif atr_ratio >= VOL_SCALE_MID:
+                vol_scale_multiplier = 0.75
+                decision_reason_parts.append(f'변동성 상승(ATR {atr_ratio:.1f}x) → 포지션 25% 축소')
+        if signal == 'buy' and vol_scale_multiplier < 1.0:
+            position_size = position_size * vol_scale_multiplier
+            risk_adjustments['vol_scale_multiplier'] = vol_scale_multiplier
+
+        # BTC 거시 장세 필터 + 경주마(디커플링) 예외: 하락장에서도 ADX>=40 초강세는 예외 매수(비중 50%). 볼륨 1.5x 필수.
         if not is_global_bull_market and signal == 'buy':
             if adx >= 40.0:
-                _vol = float(closed_candle.get('volume', 0))
-                _vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                required_vol_ratio = 1.5
-                if _vol >= _vol_ma * required_vol_ratio:
+                ok, req = volume_ok(vol_ratio, 'trend', False, weakening=False, decoupling=True)
+                if ok:
                     position_size = position_size * 0.5
                     risk_adjustments['btc_bear_decoupling_bypass'] = True
                     risk_adjustments['position_size_multiplier'] = risk_adjustments.get('position_size_multiplier', 1.0) * 0.5
                     decision_reason_parts.append('BTC 하락장이지만 초강세(ADX>=40) 감지로 예외 매수 (비중 50% 축소)')
-                    decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {_vol/_vol_ma:.1f}x >= {required_vol_ratio}x)')
+                    decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
                     decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
                 else:
                     signal = 'hold'
-                    decision_reason_parts.append(f'Volume filter failed (Vol ratio: {_vol/_vol_ma:.1f}x < {required_vol_ratio}x)')
+                    decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
             else:
                 signal = 'hold'
                 decision_reason_parts.append('BTC 하락장 필터에 의한 매수 보류')
                 decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
         
-        # 같은 봉에 대해 buy/sell 신호 중복 방지 (기준: 완성 봉 시각)
+        # 같은 봉에 대해 buy/sell 신호 중복 방지 (timeframe별 봉 버킷 사용)
         ts_now = closed_candle['time']
         if hasattr(ts_now, 'to_pydatetime'):
             ts_now = ts_now.to_pydatetime()
+        bucket_seconds = _candle_bucket_seconds(timeframe)
         session = get_session()
         try:
             skip_duplicate_write = False
             try:
                 if signal in ('buy', 'sell'):
-                    # 이 봉(ts_now)에 대해 이미 buy/sell 기록이 있는지 확인
+                    # 이 봉(ts_now)에 대해 이미 buy/sell 기록이 있는지 확인 (동일 방향만 블록)
                     existing = session.query(AnalysisResult).filter(
                         AnalysisResult.ticker == ticker,
                         AnalysisResult.signal.in_(['buy', 'sell'])
@@ -464,7 +621,7 @@ def generate_comprehensive_signal_with_logging(
                         if t is None:
                             return None
                         try:
-                            return int(pd.Timestamp(t).timestamp()) // 3600  # 1시간 봉 기준 동일 봉
+                            return int(pd.Timestamp(t).timestamp()) // bucket_seconds
                         except Exception:
                             return None
                     ts_key = _norm(ts_now)
@@ -566,13 +723,32 @@ def generate_comprehensive_signal_with_logging(
 
         if signal in ('buy', 'sell'):
             try:
-                from trading_bot.ai_logger import ai_logger
-                _es = 0.0 if pd.isna(ema_short) else float(ema_short)
-                _el = 0.0 if pd.isna(ema_long) else float(ema_long)
-                _price = current_price if current_price is not None else 0.0
-                ai_logger.info(
-                    "[STRATEGY] %s | Signal:%s | Regime:%s | Price:%s | ADX:%.1f | EMA(S/L):%s/%s",
-                    ticker, signal, regime, _fmt_num(_price), adx, _fmt_num(_es), _fmt_num(_el),
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(
+                    event_type='STRATEGY',
+                    ticker=ticker,
+                    signal=signal,
+                    price=current_price,
+                    avg_buy_price=avg_buy_price,
+                    regime=regime,
+                    timeframe=timeframe,
+                    adx=adx,
+                    rsi=float(rsi) if not pd.isna(rsi) else None,
+                    atr=float(closed_candle.get('atr', 0)),
+                    vol_ratio=float(vol_ratio),
+                    position_size=position_size,
+                    size_pct=buy_size_pct if signal == 'buy' else sell_size_pct,
+                    decision_reason=decision_reason,
+                    roi=current_roi if current_roi else None,
+                    extra={
+                        'ema_short': float(ema_short) if not pd.isna(ema_short) else 0,
+                        'ema_long': float(ema_long) if not pd.isna(ema_long) else 0,
+                        'bb_lower': float(bb_lower),
+                        'bb_upper': float(bb_upper),
+                        'scale_out_stage': scale_out_stage,
+                        'is_global_bull_market': is_global_bull_market,
+                        'mtf_blocked': mtf_blocked,
+                    },
                 )
             except Exception:
                 pass
@@ -594,6 +770,7 @@ def generate_comprehensive_signal_with_logging(
                 'atr': float(closed_candle.get('atr', 0)),
                 'bb_lower': float(bb_lower),
                 'bb_upper': float(bb_upper),
+                'vol_ratio': float(vol_ratio),
             }
         }
     except Exception as e:

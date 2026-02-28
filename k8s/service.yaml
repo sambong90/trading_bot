@@ -1,0 +1,66 @@
+# ============================================================================
+# Flask 대시보드 Service
+# main.py: app.run(host='127.0.0.1', port=5000)
+#
+# ⚠️  현재 main.py가 scheduler_service.py와 분리된 별도 프로세스가 아니라
+#     같은 컨테이너에서 실행되려면 entrypoint를 수정해야 합니다.
+#     현재 구조(scheduler_service.py가 CMD)에서 Flask 대시보드를 외부 노출하려면
+#     두 가지 방법 중 하나를 선택하세요:
+#
+#     [방법 A] 현재 구조 유지 — 내부 포트 포워딩으로만 접근 (권장):
+#       kubectl port-forward svc/trading-bot-dashboard 5000:5000 -n quant-bot
+#       → 브라우저에서 http://localhost:5000 접속
+#
+#     [방법 B] Flask를 별도 Deployment로 분리:
+#       Flask 전용 Deployment를 추가하고 이 Service와 연결
+#       (DB 공유 PVC는 ReadWriteOnce라 같은 노드에서만 가능)
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-bot-dashboard
+  namespace: quant-bot
+  labels:
+    app.kubernetes.io/name: trading-bot
+    app.kubernetes.io/component: dashboard
+spec:
+  selector:
+    app.kubernetes.io/name: trading-bot
+
+  # ── ClusterIP: 클러스터 내부 접근만 허용 ─────────────────────────────────
+  # 트레이딩 봇 API 키·잔고 정보가 외부에 노출되지 않도록 내부 전용으로 유지.
+  # 외부 접근이 필요하면 아래 NodePort/LoadBalancer 섹션을 참고.
+  type: ClusterIP
+
+  ports:
+    - name: dashboard
+      protocol: TCP
+      port: 5000        # Service가 노출하는 포트
+      targetPort: 5000  # 컨테이너 내 Flask 포트
+
+---
+# ============================================================================
+# (선택) 외부 노출이 필요한 경우 — NodePort
+# ClusterIP Service를 그대로 두고 아래를 추가로 적용하거나
+# 위의 type을 NodePort로 교체하세요.
+#
+# 적용 후 접근: http://NODE_IP:30500
+#
+# 보안 주의: Upbit API 키, 잔고, /panic 엔드포인트가 외부에 노출됨.
+#             VPN 또는 IP 화이트리스트 없이 사용하지 마세요.
+# ============================================================================
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: trading-bot-dashboard-nodeport
+#   namespace: quant-bot
+# spec:
+#   selector:
+#     app.kubernetes.io/name: trading-bot
+#   type: NodePort
+#   ports:
+#     - name: dashboard
+#       protocol: TCP
+#       port: 5000
+#       targetPort: 5000
+#       nodePort: 30500   # 30000–32767 범위에서 선택

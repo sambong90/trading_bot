@@ -12,11 +12,12 @@ TELEGRAM_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ENV = "TELEGRAM_CHAT_ID"
 
 
-def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[str] = None, parse_mode: Optional[str] = None) -> Tuple[bool, Optional[str]]:
     """Send a Telegram message via bot API (one-way notifications).
 
     Compatible with telegram_bot.py listener: both use the same Bot API; alerts and chat commands work independently.
     Expects environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID if token/chat_id not provided.
+    parse_mode: None (plain text) | 'HTML' | 'Markdown' — passed directly to Telegram API.
     Returns (True, None) on success, (False, error_message) on failure. Retries without proxy on proxy/connection errors if TELEGRAM_USE_PROXY set.
     """
     token = token or os.getenv(TELEGRAM_TOKEN_ENV)
@@ -27,6 +28,8 @@ def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[s
         )
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     def _post(proxies=None):
         return requests.post(url, json=payload, timeout=10, proxies=proxies or {})
 

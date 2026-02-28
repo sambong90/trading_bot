@@ -54,6 +54,7 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
 
     cash = initial_cash
     position = 0.0
+    entry_price = 0.0
     trades = []
     equity_curve = []
     total = len(df_signals)
@@ -64,16 +65,23 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
         equity_curve.append({'time': str(getattr(row, 'time')), 'value': equity})
         # simulate trades
         if sig == 1 and position == 0:
-            qty = (cash * 1.0) / price
-            cost = qty * price * (1 + fee_pct + slippage_pct)
+            cost_per_unit = price * (1 + fee_pct + slippage_pct)
+            if cost_per_unit <= 0:
+                cost_per_unit = price
+            qty = cash / cost_per_unit if cost_per_unit > 0 else 0
+            cost = qty * cost_per_unit
+            if cost > cash or qty <= 0:
+                continue
             position = qty
+            entry_price = price
             cash -= cost
-            trades.append({'time': str(getattr(row, 'time')), 'type': 'buy', 'price': price, 'qty': qty})
+            trades.append({'time': str(getattr(row, 'time')), 'type': 'buy', 'price': price, 'qty': qty, 'entry_price': entry_price})
         elif sig == -1 and position > 0:
             proceeds = position * price * (1 - fee_pct - slippage_pct)
             cash += proceeds
-            trades.append({'time': str(getattr(row, 'time')), 'type': 'sell', 'price': price, 'qty': position})
+            trades.append({'time': str(getattr(row, 'time')), 'type': 'sell', 'price': price, 'qty': position, 'entry_price': entry_price})
             position = 0
+            entry_price = 0.0
         # update equity progress every 5% of total or at end
         if total>0 and (idx % max(1, total//20) == 0 or idx==total-1):
             pct = int((idx+1)/total*100)
@@ -81,34 +89,38 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
             update_phase('B - 백테스트', status='in_progress', stages=stages)
 
     # 최종 자산 계산 (미청산 포지션 포함)
+    # 루프 마지막 행에서 이미 equity_curve에 추가되었으므로, 미청산 포지션이 있을 때만
+    # 최종 값을 업데이트 (중복 entry 방지)
     final_price = float(df_signals.iloc[-1]['close'])
     final_value = cash + (position * final_price if position > 0 else 0)
-    equity_curve.append({'time': str(df_signals.iloc[-1]['time']), 'value': final_value})
+    if equity_curve:
+        equity_curve[-1]['value'] = final_value  # 마지막 포인트 값만 갱신 (중복 추가 X)
+    else:
+        equity_curve.append({'time': str(df_signals.iloc[-1]['time']), 'value': final_value})
     stages['B.equity_curve']['progress'] = 100
     update_phase('B - 백테스트', status='in_progress', stages=stages)
 
-    # 손절/익절 통계 계산
-    stop_loss_trades = [t for t in trades if t.get('reason') == 'stop_loss']
-    take_profit_trades = [t for t in trades if t.get('reason') == 'take_profit']
-    signal_trades = [t for t in trades if t.get('reason') == 'signal']
-    
     # compute metrics with intermediate updates
     stages['B.metrics']['progress'] = 10
     update_phase('B - 백테스트', status='in_progress', stages=stages)
     metrics = compute_metrics(equity_curve)
-    
-    # 추가 메트릭 계산
-    total_return = (final_value - initial_cash) / initial_cash
-    max_drawdown = (peak_equity - min([e['value'] for e in equity_curve])) / peak_equity if peak_equity > 0 else 0
-    
+
+    # 추가 메트릭: total_return, win_rate
+    total_return = (final_value - initial_cash) / initial_cash if initial_cash and initial_cash > 0 else 0.0
+    sells = [t for t in trades if t.get('type') == 'sell']
+    winning_sells = [t for t in sells if float(t.get('price', 0)) > float(t.get('entry_price', 0))]
+    win_rate = len(winning_sells) / len(sells) if sells else 0.0
+
+    # max_drawdown: compute_metrics()의 올바른 peak-to-trough MDD 사용
+    # (기존: peak-min range 계산 오류 수정)
     metrics.update({
         'total_return': total_return,
-        'max_drawdown': max_drawdown,
+        'max_drawdown': metrics['mdd'],  # compute_metrics()의 정확한 peak-to-trough MDD 사용
         'total_trades': len(trades),
-        'stop_loss_count': len(stop_loss_trades),
-        'take_profit_count': len(take_profit_trades),
-        'signal_trades_count': len(signal_trades),
-        'win_rate': len([t for t in trades if t['type'] == 'sell' and t.get('price', 0) > entry_price]) / max(1, len([t for t in trades if t['type'] == 'sell'])) if position == 0 else 0
+        'win_rate': win_rate,
+        'stop_loss_count': 0,
+        'take_profit_count': 0,
+        'signal_trades_count': len(trades),
     })
     
     stages['B.metrics']['progress'] = 100

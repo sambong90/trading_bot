@@ -1,0 +1,51 @@
+# ── 버전 관리 ──────────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+
+# ── Python 캐시 / 빌드 아티팩트 ────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── 가상 환경 (이미지 내부에서 불필요) ────────────────────────────────
+.venv/
+venv/
+env/
+.env.bak
+
+# ── 민감 정보 — 이미지에 절대 포함시키지 않음 ─────────────────────────
+trading_bot/.env
+# .env.example 은 문서 목적으로 포함 허용
+
+# ── 로그 / 캐시 / DB (볼륨으로 주입) ─────────────────────────────────
+trading_bot/logs/
+trading_bot/db/
+*.db
+*.log
+*.jsonl
+
+# ── IDE / OS 파일 ──────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── 테스트 / CI ────────────────────────────────────────────────────────
+trading_bot/tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Docker 자체 파일 (불필요) ──────────────────────────────────────────
+Dockerfile
+docker-compose*.yml
+.dockerignore

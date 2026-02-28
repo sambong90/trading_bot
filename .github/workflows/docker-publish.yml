@@ -1,0 +1,124 @@
+# =============================================================================
+# GitHub Actions — Docker Build & Push to GHCR
+# =============================================================================
+#
+# ── 사전 설정 (GitHub 저장소 Settings에서 확인/변경) ──────────────────────
+#
+# [1] 자동 권한 (별도 Secret 설정 불필요)
+#   - GITHUB_TOKEN은 Actions 런타임이 자동 발급함.
+#   - 단, 저장소 Settings → Actions → General → "Workflow permissions" 가
+#     "Read and write permissions"로 설정되어 있어야 함.
+#     (또는 이 워크플로의 permissions 블록이 이를 오버라이드함 — 아래 참조)
+#
+# [2] GHCR 패키지 가시성
+#   - 이미지가 처음 push되면 GHCR 패키지는 기본적으로 "Private"로 생성됨.
+#   - 공개로 변경: GitHub 프로필 → Packages → 이미지 선택 → Settings → "Make public"
+#   - 쿠버네티스 클러스터에서 pull하려면 imagePullSecret 또는 공개 이미지 필요.
+#
+# [3] 추가 Secret (선택)
+#   - 이 워크플로는 GITHUB_TOKEN만 사용하므로 별도 Secret 불필요.
+#   - 외부 레지스트리(DockerHub, ECR 등)로 동시 push하려면
+#     Settings → Secrets and variables → Actions → "New repository secret" 에서
+#     DOCKERHUB_USERNAME, DOCKERHUB_TOKEN 등을 추가.
+#
+# =============================================================================
+
+name: Build & Push to GHCR
+
+on:
+  push:
+    branches:
+      - main  # main 브랜치 push 시에만 실행
+
+# ── 권한 설정 ──────────────────────────────────────────────────────────────
+# contents:read  — 코드 체크아웃 허용
+# packages:write — GHCR에 이미지 push 허용 (이 블록이 저장소 기본값을 오버라이드)
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # github.repository = "OWNER/REPO" 형식. metadata-action이 자동으로 소문자 변환함.
+  # GHCR은 이미지 이름에 대문자를 허용하지 않음.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. 코드 체크아웃 ───────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. QEMU 설치 (멀티 플랫폼 빌드용) ────────────────────────────
+      # M4(ARM64) 로컬 + 클라우드(AMD64) 동시 지원.
+      # linux/arm64 빌드는 GitHub Actions(ubuntu-latest = amd64) 위에서
+      # QEMU 에뮬레이션으로 크로스 컴파일됨.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # ── 3. Docker Buildx 설정 ──────────────────────────────────────────
+      # 멀티 플랫폼 빌드 및 GHA 캐시 레이어 사용에 필요.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 4. GHCR 로그인 ────────────────────────────────────────────────
+      # GITHUB_TOKEN은 자동 발급 — 별도 Secret 불필요.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 5. 이미지 태그 & 레이블 자동 생성 ────────────────────────────
+      # 생성되는 태그:
+      #   ghcr.io/OWNER/REPO:latest      — main 브랜치 최신 빌드
+      #   ghcr.io/OWNER/REPO:<sha7>      — 커밋 SHA 7자리 (예: a1b2c3d)
+      # OCI 표준 레이블(org.opencontainers.image.*)도 자동 주입됨.
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # :latest — main 브랜치에서만 붙임
+            type=raw,value=latest,enable={{is_default_branch}}
+            # :<sha7> — 커밋 SHA 앞 7자리 (롤백·추적용)
+            type=sha,prefix=,format=short
+
+      # ── 6. 빌드 & Push ──────────────────────────────────────────────────
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          dockerfile: Dockerfile
+
+          # 빌드 대상 플랫폼:
+          #   linux/amd64 — GitHub Actions 호스트 (표준 클라우드 노드)
+          #   linux/arm64 — M4 Mac 로컬 + ARM 기반 클라우드 노드 (AWS Graviton 등)
+          # 단일 플랫폼만 필요하면 한 줄로 줄여도 됨. (빌드 시간 약 50% 단축)
+          platforms: linux/amd64,linux/arm64
+
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+          # GitHub Actions 캐시 레이어 — 재빌드 시 변경된 레이어만 처리
+          # pip 레이어(requirements.txt)가 캐시되어 의존성 재설치 생략됨.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 7. 빌드 결과 요약 출력 ───────────────────────────────────────
+      - name: Image digest summary
+        run: |
+          echo "### Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| latest | \`ghcr.io/${{ env.IMAGE_NAME }}:latest\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| sha | \`ghcr.io/${{ env.IMAGE_NAME }}:$(echo ${{ github.sha }} | cut -c1-7)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| digest | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY

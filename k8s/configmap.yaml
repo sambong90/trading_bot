@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trading-bot-config
+  namespace: quant-bot
+  labels:
+    app.kubernetes.io/name: trading-bot
+data:
+  # ── 매매 모드 ────────────────────────────────────────────────────────────
+  # paper: 시뮬레이션 (실제 주문 없음) | live: 실제 매매
+  TRADING_MODE: "paper"
+
+  # ── 자동 매매 활성화 ─────────────────────────────────────────────────────
+  # "1"로 변경하면 스케줄러가 캔들 마감 후 매매 사이클 실행
+  ENABLE_AUTO_TRADING: "0"
+
+  # ── 라이브 매매 긴급 차단 플래그 ─────────────────────────────────────────
+  # /panic 명령 또는 Flask /panic 엔드포인트로 "0"으로 설정됨
+  ENABLE_AUTO_LIVE: "0"
+
+  # ── DB 경로 (컨테이너 내 절대 경로, PVC 마운트 위치와 일치) ───────────────
+  DB_URL: "sqlite:////app/trading_bot/db/trading_bot.db"
+
+  # ── 스케줄러 ─────────────────────────────────────────────────────────────
+  # 1h봉 마감 후 N초 대기 후 실행 (기본 60초 = HH:01:00)
+  CANDLE_SYNC_OFFSET_SEC: "60"
+
+  # ── 리스크 설정 ───────────────────────────────────────────────────────────
+  HARD_STOP_LOSS_PCT: "-10.0"
+  SLIPPAGE_GUARD_PCT: "3.0"
+
+  # ── 계좌 초기값 (Paper 모드 기준) ────────────────────────────────────────
+  ACCOUNT_VALUE: "1000000"
+
+  # ── 텔레그램 알림 수준 ───────────────────────────────────────────────────
+  # CRITICAL | TRADE | SUMMARY | OFF
+  TELEGRAM_ALERT_LEVEL: "TRADE"
+
+  # ── 티커 필터 ────────────────────────────────────────────────────────────
+  # 비워두면 거래대금 상위 60개 자동 선택
+  TICKERS: ""
+  TICKER_TOP_N: "60"

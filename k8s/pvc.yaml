@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trading-bot-data
+  namespace: quant-bot
+  labels:
+    app.kubernetes.io/name: trading-bot
+spec:
+  # ── ReadWriteOnce: SQLite에 필수 ───────────────────────────────────────
+  # SQLite는 단일 파일 DB로, 동시에 여러 프로세스/파드가 쓰면 DB 잠금 및 손상이 발생함.
+  # ReadWriteOnce(RWO)는 하나의 노드에서만 마운트를 허용하여 이 위험을 차단함.
+  # deployment.yaml의 strategy: Recreate 와 함께 사용하면 이전 파드가 완전히
+  # 종료된 후에야 새 파드가 볼륨을 획득하므로 DB 동시 접근이 원천 방지됨.
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # 기본 4Gi: SQLite DB(~수백 MB) + 로그 파일 여유 포함.
+      # 장기 운영 시 db_maintenance 작업이 오래된 데이터를 정리하므로 큰 용량은 불필요.
+      storage: 4Gi
+  # ── StorageClass ────────────────────────────────────────────────────────
+  # 주석 해제하여 클러스터에 맞는 StorageClass를 지정하세요:
+  #
+  # OrbStack (로컬):     storageClassName: standard
+  # AWS EKS (gp3 SSD):  storageClassName: gp3
+  # GKE:                storageClassName: standard-rwo
+  # 기본값을 사용하려면 이 줄을 삭제하거나 주석 유지
+  #
+  # storageClassName: standard
