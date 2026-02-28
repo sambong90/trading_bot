@@ -20,6 +20,10 @@ import time
 import threading
 from datetime import datetime
 
+# KST 타임존 강제 설정 (컨테이너 기본 UTC → 한국 표준시로 로그 시각 통일)
+os.environ['TZ'] = 'Asia/Seoul'
+time.tzset()
+
 # workspace root
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -372,14 +376,14 @@ if os.environ.get('ENABLE_AUTO_TRADING', '0') == '1':
     sched.add_job(
         run_trading_cycle,
         'cron',
-        minute=f'{_cron_minute}-59/5',
+        minute=f'{_cron_minute}-59/1',
         second=_cron_second,
         id='auto_trader',
         max_instances=1,
         misfire_grace_time=60,  # 스케줄 지연 시 1분 이내면 재실행 허용
     )
-    _log(f'자동 매매 활성화 (실시간 스탑로스 모니터: 매시 {_cron_minute:02d}분부터 5분 간격)')
-    _log(f'   -> 1h봉 마감 {_offset_sec}초 후 시작, 이후 5분마다 반복 (CANDLE_SYNC_OFFSET_SEC={_offset_sec})')
+    _log(f'자동 매매 활성화 (실시간 스탑로스 모니터: 매시 {_cron_minute:02d}분부터 1분 간격)')
+    _log(f'   -> 1h봉 마감 {_offset_sec}초 후 시작, 이후 1분마다 반복 (CANDLE_SYNC_OFFSET_SEC={_offset_sec})')
 else:
     _log('자동 매매 비활성화 (ENABLE_AUTO_TRADING=1로 설정하여 활성화)')
 
