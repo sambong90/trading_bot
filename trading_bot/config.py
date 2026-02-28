@@ -7,8 +7,8 @@ LOGS_DIR = Path(__file__).resolve().parent / 'logs'
 
 # RSI 필터 임계값 (환경 변수로 오버라이드 가능)
 RSI_BUY_MIN = float(os.environ.get('RSI_BUY_MIN', '40'))   # 과매도 탈출 확인
-RSI_BUY_MAX = float(os.environ.get('RSI_BUY_MAX', '65'))   # 과매수 진입 방지
-RSI_SELL_MIN = float(os.environ.get('RSI_SELL_MIN', '70')) # 과매수 구간 매도 강화
+RSI_BUY_MAX = float(os.environ.get('RSI_BUY_MAX', '75'))   # 과매수 진입 방지
+RSI_SELL_MIN = float(os.environ.get('RSI_SELL_MIN', '80')) # 과매수 구간 매도 강화
 
 # [NEW] ATR 기반 Scale-Out 배수 (환경 변수 오버라이드 가능)
 SCALE_OUT_ATR_MULT_1 = float(os.environ.get('SCALE_OUT_ATR_MULT_1', '2.0'))   # 1차 청산
@@ -26,7 +26,7 @@ TS_MULT_MID = float(os.environ.get('TS_MULT_MID', '2.0'))   # ROI 5~15%: 중간
 TS_MULT_HIGH = float(os.environ.get('TS_MULT_HIGH', '1.5')) # ROI 15%+: 타이트하게
 
 # 하드 스탑로스 (ROI %): 이 수치 이하 하락 시 전량 시장가 매도
-HARD_STOP_LOSS_PCT = float(os.environ.get('HARD_STOP_LOSS_PCT', '-10.0'))
+HARD_STOP_LOSS_PCT = float(os.environ.get('HARD_STOP_LOSS_PCT', '-15.0'))
 
 # 슬리피지 허용 범위 (%): 참조가격 대비 이 비율 초과 괴리 시 주문 거부
 SLIPPAGE_GUARD_PCT = float(os.environ.get('SLIPPAGE_GUARD_PCT', '3.0'))

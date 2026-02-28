@@ -1,20 +1,33 @@
+# ============================================================
+# full_workspace.txt — 전체 Python 소스 병합
+# 생성일: Sun Mar  1 00:20:06 KST 2026
+# 파일 수: 28
+# ============================================================
+
 ### 파일명: trading_bot/ai_logger.py ###
 
 """
-AI 전용 분석 로그 — LLM 검증용. 전략 판단·매매 액션만 기록하며 운영 로그와 분리.
-출력: trading_bot/logs/ai_debug.log (| 구분 정형 포맷)
+AI 전용 분석 로그 — LLM 검증 및 자가 진화(Self-evolving) 평가용.
+전략 판단·매매 액션만 기록하며 운영 로그와 분리.
+
+출력:
+  - trading_bot/logs/ai_debug.log    (기존 파이프 구분 포맷 — 하위 호환)
+  - trading_bot/logs/ai_analysis.jsonl (JSON Lines — AI 파싱 최적화)
 """
+import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
-# trading_bot/logs 경로 (이 모듈 기준: trading_bot/ai_logger.py → trading_bot/logs)
+# trading_bot/logs 경로
 _LOGS_DIR = Path(__file__).resolve().parent / 'logs'
 _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _AI_LOG_FILE = _LOGS_DIR / 'ai_debug.log'
+_AI_JSONL_FILE = _LOGS_DIR / 'ai_analysis.jsonl'
 
+# --- 기존 파이프 구분 텍스트 로거 (하위 호환) ---
 ai_logger = logging.getLogger('trading_bot.ai')
 ai_logger.setLevel(logging.INFO)
-# 기존 핸들러가 붙어 있으면 중복 방지 (다른 모듈에서 import 시 재사용)
 if not ai_logger.handlers:
     _handler = logging.FileHandler(_AI_LOG_FILE, encoding='utf-8')
     _handler.setLevel(logging.INFO)
@@ -23,7 +36,93 @@ if not ai_logger.handlers:
         datefmt='%Y-%m-%d %H:%M:%S',
     ))
     ai_logger.addHandler(_handler)
-    ai_logger.propagate = False  # 루트 로거로 전파하지 않음 (콘솔 미출력)
+    ai_logger.propagate = False
+
+
+def log_ai_event(
+    event_type: str,
+    ticker: str,
+    signal: str = None,
+    price: float = None,
+    avg_buy_price: float = None,
+    regime: str = None,
+    timeframe: str = None,
+    adx: float = None,
+    rsi: float = None,
+    atr: float = None,
+    vol_ratio: float = None,
+    position_size: float = None,
+    size_pct: float = None,
+    decision_reason: str = None,
+    roi: float = None,
+    api_status: str = None,
+    extra: dict = None,
+):
+    """
+    AI 분석용 정형화된 JSON 로그 기록.
+
+    Parameters:
+        event_type: 'STRATEGY' | 'EXECUTE' | 'SKIP' | 'ERROR' | 'STOP_LOSS' | 'DCA' | 'SCALE_OUT'
+        ticker: 코인 티커 (e.g. 'KRW-BTC')
+        signal: 'buy' | 'sell' | 'hold'
+        price: 현재가
+        avg_buy_price: 평균 매수가 (진입가)
+        regime: 'trend' | 'range' | 'weakening_trend' | 'transition'
+        timeframe: 'minute60' | 'day' 등
+        adx: ADX 값
+        rsi: RSI 값
+        atr: ATR 값
+        vol_ratio: 거래량 비율 (현재봉/MA)
+        position_size: 포지션 크기 (KRW)
+        size_pct: 비중 (0~1)
+        decision_reason: 판단 사유 문자열
+        roi: 현재 수익률 (%)
+        api_status: API 응답 상태 ('ok' | 'error' | 'timeout' 등)
+        extra: 추가 키-값 (dict)
+    """
+    record = {
+        'ts': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'event': event_type,
+        'ticker': ticker,
+        'signal': signal,
+        'price': price,
+        'avg_buy_price': avg_buy_price,
+        'roi_pct': round(roi, 2) if roi is not None else None,
+        'regime': regime,
+        'timeframe': timeframe,
+        'adx': round(adx, 1) if adx is not None else None,
+        'rsi': round(rsi, 1) if rsi is not None else None,
+        'atr': round(atr, 2) if atr is not None else None,
+        'vol_ratio': round(vol_ratio, 2) if vol_ratio is not None else None,
+        'position_size_krw': round(position_size, 0) if position_size is not None else None,
+        'size_pct': round(size_pct, 4) if size_pct is not None else None,
+        'decision_reason': decision_reason,
+        'api_status': api_status,
+    }
+    if extra:
+        record['extra'] = extra
+
+    # None 값 제거 (JSONL 파일 크기 최적화)
+    record = {k: v for k, v in record.items() if v is not None}
+
+    try:
+        with open(_AI_JSONL_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+    except Exception:
+        pass
+
+    # 기존 파이프 구분 로거에도 기록 (하위 호환)
+    try:
+        ai_logger.info(
+            "[%s] %s | Signal:%s | Price:%s | Regime:%s | ADX:%s | RSI:%s",
+            event_type, ticker, signal or '-',
+            f'{price:.0f}' if price and price >= 10 else f'{price:.4f}' if price else '-',
+            regime or '-',
+            f'{adx:.1f}' if adx is not None else '-',
+            f'{rsi:.1f}' if rsi is not None else '-',
+        )
+    except Exception:
+        pass
 
 
 ### 파일명: trading_bot/backtest.py ###
@@ -84,6 +183,7 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
 
     cash = initial_cash
     position = 0.0
+    entry_price = 0.0
     trades = []
     equity_curve = []
     total = len(df_signals)
@@ -94,16 +194,23 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
         equity_curve.append({'time': str(getattr(row, 'time')), 'value': equity})
         # simulate trades
         if sig == 1 and position == 0:
-            qty = (cash * 1.0) / price
-            cost = qty * price * (1 + fee_pct + slippage_pct)
+            cost_per_unit = price * (1 + fee_pct + slippage_pct)
+            if cost_per_unit <= 0:
+                cost_per_unit = price
+            qty = cash / cost_per_unit if cost_per_unit > 0 else 0
+            cost = qty * cost_per_unit
+            if cost > cash or qty <= 0:
+                continue
             position = qty
+            entry_price = price
             cash -= cost
-            trades.append({'time': str(getattr(row, 'time')), 'type': 'buy', 'price': price, 'qty': qty})
+            trades.append({'time': str(getattr(row, 'time')), 'type': 'buy', 'price': price, 'qty': qty, 'entry_price': entry_price})
         elif sig == -1 and position > 0:
             proceeds = position * price * (1 - fee_pct - slippage_pct)
             cash += proceeds
-            trades.append({'time': str(getattr(row, 'time')), 'type': 'sell', 'price': price, 'qty': position})
+            trades.append({'time': str(getattr(row, 'time')), 'type': 'sell', 'price': price, 'qty': position, 'entry_price': entry_price})
             position = 0
+            entry_price = 0.0
         # update equity progress every 5% of total or at end
         if total>0 and (idx % max(1, total//20) == 0 or idx==total-1):
             pct = int((idx+1)/total*100)
@@ -111,34 +218,38 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
             update_phase('B - 백테스트', status='in_progress', stages=stages)
 
     # 최종 자산 계산 (미청산 포지션 포함)
+    # 루프 마지막 행에서 이미 equity_curve에 추가되었으므로, 미청산 포지션이 있을 때만
+    # 최종 값을 업데이트 (중복 entry 방지)
     final_price = float(df_signals.iloc[-1]['close'])
     final_value = cash + (position * final_price if position > 0 else 0)
-    equity_curve.append({'time': str(df_signals.iloc[-1]['time']), 'value': final_value})
+    if equity_curve:
+        equity_curve[-1]['value'] = final_value  # 마지막 포인트 값만 갱신 (중복 추가 X)
+    else:
+        equity_curve.append({'time': str(df_signals.iloc[-1]['time']), 'value': final_value})
     stages['B.equity_curve']['progress'] = 100
     update_phase('B - 백테스트', status='in_progress', stages=stages)
 
-    # 손절/익절 통계 계산
-    stop_loss_trades = [t for t in trades if t.get('reason') == 'stop_loss']
-    take_profit_trades = [t for t in trades if t.get('reason') == 'take_profit']
-    signal_trades = [t for t in trades if t.get('reason') == 'signal']
-    
     # compute metrics with intermediate updates
     stages['B.metrics']['progress'] = 10
     update_phase('B - 백테스트', status='in_progress', stages=stages)
     metrics = compute_metrics(equity_curve)
-    
-    # 추가 메트릭 계산
-    total_return = (final_value - initial_cash) / initial_cash
-    max_drawdown = (peak_equity - min([e['value'] for e in equity_curve])) / peak_equity if peak_equity > 0 else 0
-    
+
+    # 추가 메트릭: total_return, win_rate
+    total_return = (final_value - initial_cash) / initial_cash if initial_cash and initial_cash > 0 else 0.0
+    sells = [t for t in trades if t.get('type') == 'sell']
+    winning_sells = [t for t in sells if float(t.get('price', 0)) > float(t.get('entry_price', 0))]
+    win_rate = len(winning_sells) / len(sells) if sells else 0.0
+
+    # max_drawdown: compute_metrics()의 올바른 peak-to-trough MDD 사용
+    # (기존: peak-min range 계산 오류 수정)
     metrics.update({
         'total_return': total_return,
-        'max_drawdown': max_drawdown,
+        'max_drawdown': metrics['mdd'],  # compute_metrics()의 정확한 peak-to-trough MDD 사용
         'total_trades': len(trades),
-        'stop_loss_count': len(stop_loss_trades),
-        'take_profit_count': len(take_profit_trades),
-        'signal_trades_count': len(signal_trades),
-        'win_rate': len([t for t in trades if t['type'] == 'sell' and t.get('price', 0) > entry_price]) / max(1, len([t for t in trades if t['type'] == 'sell'])) if position == 0 else 0
+        'win_rate': win_rate,
+        'stop_loss_count': 0,
+        'take_profit_count': 0,
+        'signal_trades_count': len(trades),
     })
     
     stages['B.metrics']['progress'] = 100
@@ -178,6 +289,270 @@ def simple_backtest(df_signals, initial_cash=100000, fee_pct=0.0005, slippage_pc
         print('Failed to write backtest to DB:', e)
 
     return {'final_value': final_value, 'trades': trades, 'equity_curve': equity_curve, 'metrics': metrics}
+
+
+
+### 파일명: trading_bot/balanced_plus.py ###
+
+"""
+Balanced+ position management: overtrading guards, DCA, partial stop-loss.
+State is tracked via analysis_results.decision_reason tags (no schema change).
+All helpers defensive: on DB error return safe default (no cooldown), never crash.
+"""
+import os
+from datetime import datetime, timedelta
+from typing import Optional
+
+# ----- Env-overridable constants (no code edit needed to tune) -----
+def _int(key: str, default: str) -> int:
+    try:
+        return int(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+def _float(key: str, default: str) -> float:
+    try:
+        return float(os.environ.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+def _bool(key: str, default: str) -> bool:
+    v = os.environ.get(key, default).lower()
+    return v in ('1', 'true', 'yes')
+
+MAX_BUYS_PER_CYCLE = _int('MAX_BUYS_PER_CYCLE', '2')
+MAX_OPEN_POSITIONS = _int('MAX_OPEN_POSITIONS', '6')
+BUY_COOLDOWN_MINUTES = _int('BUY_COOLDOWN_MINUTES', '60')
+SELL_COOLDOWN_MINUTES = _int('SELL_COOLDOWN_MINUTES', '15')
+
+DCA_ENABLED = _bool('DCA_ENABLED', 'true')
+DCA_MAX_PER_TICKER_PER_DAY = _int('DCA_MAX_PER_TICKER_PER_DAY', '1')
+DCA_COOLDOWN_MINUTES = _int('DCA_COOLDOWN_MINUTES', '120')
+DCA_TRIGGER_ROI_PCT = _float('DCA_TRIGGER_ROI_PCT', '-3.0')
+DCA_SIZE_MULTIPLIER = _float('DCA_SIZE_MULTIPLIER', '0.30')
+DCA_MIN_VOL_RATIO = _float('DCA_MIN_VOL_RATIO', '1.0')
+DCA_ALLOWED_REGIMES = {'trend'}
+
+PARTIAL_STOP_1_ROI_PCT = _float('PARTIAL_STOP_1_ROI_PCT', '-5.0')
+PARTIAL_STOP_1_SELL_PCT = _float('PARTIAL_STOP_1_SELL_PCT', '0.25')
+PARTIAL_STOP_2_ROI_PCT = _float('PARTIAL_STOP_2_ROI_PCT', '-8.0')
+PARTIAL_STOP_2_SELL_PCT = _float('PARTIAL_STOP_2_SELL_PCT', '0.25')
+PARTIAL_STOP_COOLDOWN_MINUTES = _int('PARTIAL_STOP_COOLDOWN_MINUTES', '120')
+
+TREND_BUY_MIN_VOL_RATIO = _float('TREND_BUY_MIN_VOL_RATIO', '1.0')
+RANGE_BUY_MIN_VOL_RATIO = _float('RANGE_BUY_MIN_VOL_RATIO', '0.8')
+
+TAG_DCA_BUY = 'DCA_BUY'
+TAG_PS1 = 'PS1'
+TAG_PS2 = 'PS2'
+TAG_EXEC_BUY = 'EXEC_BUY'
+TAG_EXEC_SELL = 'EXEC_SELL'
+
+
+def last_buy_ts(ticker: str):
+    """Latest AnalysisResult where ticker==ticker and signal=='buy'. Returns None on error."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import AnalysisResult
+        session = get_session()
+        try:
+            row = session.query(AnalysisResult).filter(
+                AnalysisResult.ticker == ticker,
+                AnalysisResult.signal == 'buy'
+            ).order_by(AnalysisResult.timestamp.desc()).limit(1).first()
+            return row.timestamp if row and row.timestamp else None
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def last_sell_ts(ticker: str):
+    """Latest AnalysisResult where ticker==ticker and signal=='sell'. Returns None on error."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import AnalysisResult
+        session = get_session()
+        try:
+            row = session.query(AnalysisResult).filter(
+                AnalysisResult.ticker == ticker,
+                AnalysisResult.signal == 'sell'
+            ).order_by(AnalysisResult.timestamp.desc()).limit(1).first()
+            return row.timestamp if row and row.timestamp else None
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def count_tag_last_24h(ticker: str, tag: str) -> int:
+    """Number of AnalysisResult rows in last 24h where ticker==ticker and decision_reason contains tag."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import AnalysisResult
+        since = datetime.utcnow() - timedelta(hours=24)
+        session = get_session()
+        try:
+            rows = session.query(AnalysisResult).filter(
+                AnalysisResult.ticker == ticker,
+                AnalysisResult.timestamp >= since
+            ).all()
+            return sum(1 for r in rows if r.decision_reason and tag in r.decision_reason)
+        finally:
+            session.close()
+    except Exception:
+        return 0
+
+
+def _last_ts_with_tag(ticker: str, tag: str):
+    """Latest AnalysisResult.timestamp where decision_reason contains tag. None on error."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import AnalysisResult
+        session = get_session()
+        try:
+            rows = session.query(AnalysisResult).filter(
+                AnalysisResult.ticker == ticker
+            ).order_by(AnalysisResult.timestamp.desc()).limit(200).all()
+            for r in rows:
+                if r.decision_reason and tag in r.decision_reason and r.timestamp:
+                    return r.timestamp
+            return None
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def is_in_buy_cooldown(ticker: str) -> bool:
+    """True if last_buy_ts within BUY_COOLDOWN_MINUTES. On error returns False (no cooldown)."""
+    ts = last_buy_ts(ticker)
+    if ts is None:
+        return False
+    try:
+        if hasattr(ts, 'timestamp'):
+            t = ts.timestamp()
+        else:
+            t = (ts - datetime(1970, 1, 1)).total_seconds()
+        return (datetime.utcnow().timestamp() - t) < (BUY_COOLDOWN_MINUTES * 60)
+    except Exception:
+        return False
+
+
+def is_in_dca_cooldown(ticker: str) -> bool:
+    """True if last DCA_BUY event within DCA_COOLDOWN_MINUTES."""
+    ts = _last_ts_with_tag(ticker, TAG_DCA_BUY)
+    if ts is None:
+        return False
+    try:
+        if hasattr(ts, 'timestamp'):
+            t = ts.timestamp()
+        else:
+            t = (ts - datetime(1970, 1, 1)).total_seconds()
+        return (datetime.utcnow().timestamp() - t) < (DCA_COOLDOWN_MINUTES * 60)
+    except Exception:
+        return False
+
+
+def is_in_partial_stop_cooldown(ticker: str) -> bool:
+    """True if last PS1/PS2 event within PARTIAL_STOP_COOLDOWN_MINUTES."""
+    ts1 = _last_ts_with_tag(ticker, TAG_PS1)
+    ts2 = _last_ts_with_tag(ticker, TAG_PS2)
+    ts = ts1 or ts2
+    if ts is None:
+        return False
+    try:
+        if hasattr(ts, 'timestamp'):
+            t = ts.timestamp()
+        else:
+            t = (ts - datetime(1970, 1, 1)).total_seconds()
+        return (datetime.utcnow().timestamp() - t) < (PARTIAL_STOP_COOLDOWN_MINUTES * 60)
+    except Exception:
+        return False
+
+
+def count_open_positions(executor, tickers: list) -> int:
+    """Count tickers with position qty > 0. Paper: executor.positions; Live: _balance_cache non-KRW with balance > 0."""
+    try:
+        if hasattr(executor, 'positions'):
+            return sum(1 for t, p in getattr(executor, 'positions', {}).items() if (p.get('qty') or 0) > 0)
+        if hasattr(executor, '_balance_cache'):
+            cache = getattr(executor, '_balance_cache', {}) or {}
+            return sum(1 for cur, bal in cache.items() if cur != 'KRW' and float(bal or 0) > 0)
+        return sum(1 for t in tickers if (executor.get_position_qty(t) or 0) > 0)
+    except Exception:
+        return 0
+
+
+def log_execution_event(ticker: str, signal: str, tag: str, price: float = None):
+    """Best-effort insert AnalysisResult row for executed action (EXEC_BUY/EXEC_SELL/DCA_BUY/PS1/PS2). Never crash."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import AnalysisResult
+        session = get_session()
+        try:
+            rec = AnalysisResult(
+                ticker=ticker,
+                timestamp=datetime.utcnow(),
+                signal=signal,
+                price=price,
+                decision_reason=tag,
+                regime=None,
+                position_size=None,
+            )
+            session.add(rec)
+            session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
+    except Exception:
+        pass
+
+
+### 파일명: trading_bot/config.py ###
+
+# [NEW] Trading Bot 설정 상수 (환경 변수로 오버라이드 가능)
+import os
+from pathlib import Path
+
+# 로그/상태 파일 디렉터리 (paper_state.json 등)
+LOGS_DIR = Path(__file__).resolve().parent / 'logs'
+
+# RSI 필터 임계값 (환경 변수로 오버라이드 가능)
+RSI_BUY_MIN = float(os.environ.get('RSI_BUY_MIN', '40'))   # 과매도 탈출 확인
+RSI_BUY_MAX = float(os.environ.get('RSI_BUY_MAX', '65'))   # 과매수 진입 방지
+RSI_SELL_MIN = float(os.environ.get('RSI_SELL_MIN', '70')) # 과매수 구간 매도 강화
+
+# [NEW] ATR 기반 Scale-Out 배수 (환경 변수 오버라이드 가능)
+SCALE_OUT_ATR_MULT_1 = float(os.environ.get('SCALE_OUT_ATR_MULT_1', '2.0'))   # 1차 청산
+SCALE_OUT_ATR_MULT_2 = float(os.environ.get('SCALE_OUT_ATR_MULT_2', '3.5'))   # 2차 청산
+SCALE_OUT_ROI_FALLBACK_1 = float(os.environ.get('SCALE_OUT_ROI_FALLBACK_1', '5.0'))
+SCALE_OUT_ROI_FALLBACK_2 = float(os.environ.get('SCALE_OUT_ROI_FALLBACK_2', '10.0'))
+
+# [NEW] 변동성 스케일링 임계값
+VOL_SCALE_HIGH = float(os.environ.get('VOL_SCALE_HIGH', '2.0'))  # ATR 2배 이상 → 50% 축소
+VOL_SCALE_MID = float(os.environ.get('VOL_SCALE_MID', '1.5'))     # ATR 1.5배 이상 → 75% 축소
+
+# [NEW] 트레일링 스탑 ATR 배수 (수익 구간별)
+TS_MULT_LOW = float(os.environ.get('TS_MULT_LOW', '3.0'))   # ROI 0~5%: 느슨하게
+TS_MULT_MID = float(os.environ.get('TS_MULT_MID', '2.0'))   # ROI 5~15%: 중간
+TS_MULT_HIGH = float(os.environ.get('TS_MULT_HIGH', '1.5')) # ROI 15%+: 타이트하게
+
+# 하드 스탑로스 (ROI %): 이 수치 이하 하락 시 전량 시장가 매도
+HARD_STOP_LOSS_PCT = float(os.environ.get('HARD_STOP_LOSS_PCT', '-10.0'))
+
+# 슬리피지 허용 범위 (%): 참조가격 대비 이 비율 초과 괴리 시 주문 거부
+SLIPPAGE_GUARD_PCT = float(os.environ.get('SLIPPAGE_GUARD_PCT', '3.0'))
+
+# 텔레그램 알림 레벨 (CRITICAL > TRADE > SUMMARY > OFF)
+TELEGRAM_ALERT_LEVEL = os.environ.get('TELEGRAM_ALERT_LEVEL', 'TRADE')
+
+# 텔레그램 관리자 인증 (숫자 user_id, 비어있으면 CHAT_ID만 체크)
+TELEGRAM_ADMIN_USER_ID = os.environ.get('TELEGRAM_ADMIN_USER_ID', '')
+
+# 스케줄러 캔들 마감 동기화 오프셋 (정시 후 N초에 실행, 기본 60초 = HH:01:00)
+CANDLE_SYNC_OFFSET_SEC = int(os.environ.get('CANDLE_SYNC_OFFSET_SEC', '60'))
 
 
 ### 파일명: trading_bot/dashboard.py ###
@@ -243,6 +618,7 @@ def data_api():
 
 if __name__ == '__main__':
     app.run(port=5000)
+
 
 
 ### 파일명: trading_bot/data.py ###
@@ -541,37 +917,39 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
             pass
     update_phase('A - 데이터 수집', status='done', percent=100, recent_actions=[f'fetch complete rows={len(df)}'])
     # write to DB (upsert-like: try insert, ignore on conflict for sqlite simple approach)
-    # Try DB-specific upsert when possible to avoid IntegrityError noise.
+    session = None
+    conn = None
     try:
         session = get_session()
         engine = session.get_bind()
         dialect = engine.dialect.name
-        # If sqlite, use INSERT OR IGNORE for performance
         if dialect == 'sqlite':
             from sqlalchemy import text
             conn = engine.connect()
-            for _, row in df.iterrows():
-                ins = text("INSERT OR IGNORE INTO ohlcv (ticker, timeframe, ts, open, high, low, close, volume, source) VALUES (:ticker, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)")
-                params = {
-                    'ticker': ticker,
-                    'timeframe': interval,
-                    'ts': row['time'].to_pydatetime(),
-                    'open': float(row['open']),
-                    'high': float(row['high']),
-                    'low': float(row['low']),
-                    'close': float(row['close']),
-                    'volume': float(row['volume']),
-                    'source': 'upbit'
-                }
-                try:
-                    conn.execute(ins, params)
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
-                    continue
-            conn.close()
+            try:
+                for _, row in df.iterrows():
+                    ins = text("INSERT OR IGNORE INTO ohlcv (ticker, timeframe, ts, open, high, low, close, volume, source) VALUES (:ticker, :timeframe, :ts, :open, :high, :low, :close, :volume, :source)")
+                    params = {
+                        'ticker': ticker,
+                        'timeframe': interval,
+                        'ts': row['time'].to_pydatetime(),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row['volume']),
+                        'source': 'upbit'
+                    }
+                    try:
+                        conn.execute(ins, params)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        continue
+            finally:
+                conn.close()
+                conn = None
         else:
-            # generic fallback: attempt insert with flush and ignore duplicates
             from sqlalchemy.exc import IntegrityError
             for _, row in df.iterrows():
                 o = OHLCV(ticker=ticker, timeframe=interval, ts=row['time'].to_pydatetime(), open=float(row['open']), high=float(row['high']), low=float(row['low']), close=float(row['close']), volume=float(row['volume']), source='upbit')
@@ -581,19 +959,26 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
                 except IntegrityError:
                     session.rollback()
                     continue
-        session.commit()
+            session.commit()
     except Exception as e:
         print('db write failed', e)
     finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
     return df
 
 
 def save_csv(df, path):
     df.to_csv(path, index=False)
+
 
 
 ### 파일명: trading_bot/data_manager.py ###
@@ -845,6 +1230,7 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
         session.close()
 
 
+
 ### 파일명: trading_bot/db.py ###
 
 import os
@@ -874,6 +1260,7 @@ def ensure_tables():
     Base.metadata.create_all(bind=engine)
 
 
+
 ### 파일명: trading_bot/executor.py ###
 
 from datetime import datetime
@@ -882,9 +1269,9 @@ from trading_bot.tasks.state_updater import update_phase
 
 class PaperExecutor:
     def __init__(self, initial_cash=100000):
-        self.cash = initial_cash
+        self.cash = self._load_cash_from_db(initial_cash)  # [IMPROVED]
         # 티커별 포지션: { ticker: {'qty': float, 'avg_price': float}, ... }
-        self.positions = {}
+        self.positions = self._load_positions_from_db()  # [NEW]
         self.log = []
         # executor stages
         self.stages = {
@@ -894,6 +1281,94 @@ class PaperExecutor:
             'C.logging': {'weight':10, 'progress':0}
         }
         update_phase('C - 실행기(Paper)', status='in_progress', stages=self.stages)
+
+    # [NEW] paper_state.json 우선 (qty 포함), 없으면 position_states 테이블 (avg_price만)
+    def _load_positions_from_db(self):
+        try:
+            from trading_bot.config import LOGS_DIR
+            import json
+            state_file = LOGS_DIR / 'paper_state.json'
+            if state_file.exists():
+                data = json.loads(state_file.read_text(encoding='utf-8'))
+                raw = data.get('positions', {})
+                if raw:
+                    return {
+                        t: {'qty': float(p.get('qty', 0)), 'avg_price': float(p.get('avg_price', 0))}
+                        for t, p in raw.items()
+                        if float(p.get('qty', 0)) > 0
+                    }
+        except Exception:
+            pass
+        try:
+            from trading_bot.db import get_session
+            from trading_bot.models import PositionState
+            session = get_session()
+            try:
+                rows = session.query(PositionState).all()
+                return {
+                    r.ticker: {'qty': 0.0, 'avg_price': float(r.avg_buy_price or 0)}
+                    for r in rows if r.avg_buy_price and r.avg_buy_price > 0
+                }
+            finally:
+                session.close()
+        except Exception:
+            pass
+        return {}
+
+    # [IMPROVED] paper_state 키로 저장된 가용 현금 복원
+    def _load_cash_from_db(self, default_cash: float) -> float:
+        try:
+            import json
+            from trading_bot.config import LOGS_DIR
+            state_file = LOGS_DIR / 'paper_state.json'
+            if state_file.exists():
+                data = json.loads(state_file.read_text(encoding='utf-8'))
+                return float(data.get('cash', default_cash))
+        except Exception:
+            pass
+        return default_cash
+
+    # [NEW] 현재 포지션·현금을 DB 및 파일에 저장 (place_order 완료 후 호출)
+    def _save_state_to_db(self):
+        try:
+            from trading_bot.db import get_session
+            from trading_bot.models import PositionState
+            session = get_session()
+            try:
+                for ticker, pos in self.positions.items():
+                    existing = session.query(PositionState).filter(PositionState.ticker == ticker).first()
+                    if existing:
+                        existing.avg_buy_price = pos.get('avg_price', 0.0)
+                        existing.stage = 0
+                    else:
+                        session.add(PositionState(
+                            ticker=ticker,
+                            avg_buy_price=pos.get('avg_price', 0.0),
+                            stage=0,
+                        ))
+                # 포지션 없어진 티커는 position_states에서 제거
+                for row in session.query(PositionState).all():
+                    if row.ticker not in self.positions:
+                        session.delete(row)
+                session.commit()
+            finally:
+                session.close()
+        except Exception:
+            pass
+        try:
+            import json
+            from trading_bot.config import LOGS_DIR
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            state_file = LOGS_DIR / 'paper_state.json'
+            state_file.write_text(json.dumps({
+                'cash': self.cash,
+                'positions': {
+                    t: {'qty': p['qty'], 'avg_price': p['avg_price']}
+                    for t, p in self.positions.items()
+                }
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception:
+            pass
 
     def _update_stage(self, name, progress):
         # internal helper to update a stage progress
@@ -919,19 +1394,41 @@ class PaperExecutor:
         Paper 모드 주문. 티커별 포지션(qty, 평균단가)을 독립 관리.
         LiveExecutor와 시그니처 동일: side, price, size_pct, ticker.
         """
+        import logging
+        _logger = logging.getLogger(__name__)
+
         # validation
         self._update_stage('C.validation', 20)
         time.sleep(0.01)
         if side == 'buy':
-            qty = (self.cash * size_pct) / price if price else 0
-            cost = qty * price
-            if cost <= 0:
+            # --- 가격 유효성 검증 ---
+            if not price or price <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['유효하지 않은 가격'])
+                _logger.warning('[Paper] %s 매수 거부: 유효하지 않은 가격 (price=%s)', ticker, price)
+                return
+            # --- 가용 현금 검증 (잔고 마이너스 방지) ---
+            if self.cash <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['가용 현금 없음'])
+                _logger.warning('[Paper] %s 매수 거부: 가용 현금 없음 (cash=%.0f)', ticker, self.cash)
+                return
+            # 가용 현금 범위 내에서만 매수 (잔고 마이너스 절대 방지)
+            spend = min(self.cash * size_pct, self.cash)
+            if spend < 5000:  # 업비트 최소 주문 금액
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=[f'최소 주문 금액(5,000원) 미달: {spend:.0f}원'])
+                _logger.warning('[Paper] %s 매수 거부: 최소 주문 금액 미달 (spend=%.0f)', ticker, spend)
+                return
+            qty = spend / price
+            cost = spend  # spend 자체가 이미 cash 이하로 보장됨
+            if qty <= 0:
                 self._update_stage('C.validation', 100)
                 update_phase('C - 실행기(Paper)', status='failed', issues=['잘못된 주문금액'])
                 return
             self._update_stage('C.sim_fill', 30)
             filled = qty
-            self.cash -= filled * price
+            self.cash -= cost
             # 티커별 포지션 갱신 (평균 단가)
             if ticker not in self.positions:
                 self.positions[ticker] = {'qty': 0.0, 'avg_price': 0.0}
@@ -944,9 +1441,16 @@ class PaperExecutor:
             self._update_stage('C.sim_fill', 100)
             self._update_stage('C.logging', 100)
             self._persist_order(rec, status='filled')
+            self._save_state_to_db()
             update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} buy executed price={price} qty={filled:.6f}'], stages=self.stages)
         elif side == 'sell':
             self._update_stage('C.validation', 50)
+            # --- 가격 유효성 검증 ---
+            if not price or price <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='failed', issues=['매도 가격이 유효하지 않음'])
+                _logger.warning('[Paper] %s 매도 거부: 유효하지 않은 가격 (price=%s)', ticker, price)
+                return
             pos = self.positions.get(ticker, {'qty': 0.0, 'avg_price': 0.0})
             hold_qty = pos['qty']
             if hold_qty <= 0:
@@ -955,16 +1459,24 @@ class PaperExecutor:
                 return
             self._update_stage('C.sim_fill', 50)
             sell_qty = hold_qty * size_pct if size_pct <= 1 else min(size_pct, hold_qty)
+            # --- 매도 수량이 보유 수량 초과 방지 ---
+            sell_qty = min(sell_qty, hold_qty)
+            if sell_qty <= 0:
+                self._update_stage('C.validation', 100)
+                update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} sell skipped: sell_qty=0'])
+                return
             proceeds = sell_qty * price
             self.cash += proceeds
             rec = {'time': datetime.utcnow().isoformat(), 'side': 'sell', 'price': price, 'qty': sell_qty, 'ticker': ticker}
+            rec['entry_price'] = pos.get('avg_price', 0.0)  # 연속 손실 계산용
             self.log.append(rec)
             pos['qty'] -= sell_qty
-            if pos['qty'] <= 0:
+            if pos['qty'] <= 1e-12:  # 부동소수점 찌꺼기 정리
                 del self.positions[ticker]
             self._update_stage('C.sim_fill', 100)
             self._update_stage('C.logging', 100)
             self._persist_order(rec, status='filled')
+            self._save_state_to_db()
             update_phase('C - 실행기(Paper)', status='in_progress', recent_actions=[f'{ticker} sell executed price={price} qty={sell_qty:.6f}'], stages=self.stages)
 
     def refresh_balance_cache(self):
@@ -1042,38 +1554,134 @@ class LiveExecutor:
         except Exception as e:
             print('Failed to persist live order:', e)
 
+    # --- 하드 스탑로스 환경 변수 (기본값: -10%) ---
+    HARD_STOP_LOSS_PCT = None
+
+    def _get_hard_stop_loss_pct(self):
+        import os
+        try:
+            return float(os.environ.get('HARD_STOP_LOSS_PCT', '-10.0'))
+        except (TypeError, ValueError):
+            return -10.0
+
+    def check_hard_stop_loss(self, ticker, current_price):
+        """
+        하드 스탑로스 체크. 보유 포지션의 ROI가 HARD_STOP_LOSS_PCT 이하이면
+        즉시 전량 시장가 매도를 트리거.
+        반환: True면 스탑로스 발동(매도 완료), False면 정상.
+        """
+        import logging
+        _logger = logging.getLogger(__name__)
+        try:
+            avg_price = self.get_avg_buy_price(ticker)
+            qty = self.get_position_qty(ticker)
+            if qty <= 0 or avg_price <= 0 or current_price is None or current_price <= 0:
+                return False
+            roi = (current_price - avg_price) / avg_price * 100
+            threshold = self._get_hard_stop_loss_pct()
+            if roi <= threshold:
+                _logger.critical(
+                    '[HARD STOP-LOSS] %s ROI=%.1f%% <= %.1f%% | AvgPrice=%.0f CurrentPrice=%.0f | 전량 시장가 매도 실행',
+                    ticker, roi, threshold, avg_price, current_price,
+                )
+                self._notify_telegram(
+                    f'🚨 [HARD STOP-LOSS] {ticker}\nROI: {roi:.1f}% (임계값: {threshold}%)\n'
+                    f'평단가: {avg_price:,.0f}원 → 현재가: {current_price:,.0f}원\n전량 시장가 매도 실행'
+                )
+                # 전량 매도 (size_pct=1.0). 이 함수 내에서 place_order 재귀 방지를 위해 직접 API 호출
+                try:
+                    asset_currency = ticker.split('-')[1]
+                    resp = self.client.sell_market_order(ticker, qty)
+                    _logger.info('[HARD STOP-LOSS] %s 매도 주문 응답: %s', ticker, resp)
+                    import pandas as pd
+                    rec = {
+                        'time': pd.Timestamp.now().isoformat(),
+                        'side': 'sell', 'price': current_price, 'qty': qty,
+                        'ticker': ticker, 'reason': 'HARD_STOP_LOSS',
+                    }
+                    order_id = resp.get('uuid') if isinstance(resp, dict) else None
+                    self._persist_order({**rec, 'order_id': order_id}, status='stop_loss')
+                except Exception as e2:
+                    _logger.error('[HARD STOP-LOSS] %s 매도 실행 실패: %s', ticker, e2)
+                    self._notify_telegram(f'❌ HARD STOP-LOSS 매도 실패: {ticker} — {e2}')
+                return True
+        except Exception as e:
+            _logger.warning('[HARD STOP-LOSS] %s 체크 중 오류: %s', ticker, e)
+        return False
+
+    def cancel_all_open_orders(self, ticker=None):
+        """미체결 주문 전량 취소. ticker 지정 시 해당 티커만, None이면 전체."""
+        import logging
+        _logger = logging.getLogger(__name__)
+        if not self.enabled or not self.client:
+            return []
+        try:
+            import pyupbit
+            open_orders = self.client.get_order(ticker) if ticker else []
+            cancelled = []
+            for order in (open_orders or []):
+                try:
+                    uuid = order.get('uuid')
+                    if uuid and order.get('state') in ('wait', 'watch'):
+                        self.client.cancel_order(uuid)
+                        cancelled.append(uuid)
+                        _logger.info('[주문 취소] %s uuid=%s', ticker or 'ALL', uuid)
+                except Exception as e:
+                    _logger.warning('[주문 취소 실패] uuid=%s: %s', order.get('uuid'), e)
+            if cancelled:
+                self._notify_telegram(f'🗑️ 미체결 주문 {len(cancelled)}건 취소 완료 ({ticker or "전체"})')
+            return cancelled
+        except Exception as e:
+            _logger.warning('[주문 취소] 조회 실패: %s', e)
+            return []
+
     def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC'):
         """
         실제 거래 주문 실행 (개선된 버전)
-        
+
         Parameters:
         - side: 'buy' or 'sell'
         - price: 주문 가격
         - size_pct: 포지션 크기 비율
         - ticker: 거래할 코인 티커 (하드코딩 제거)
         """
-        import os, pandas as pd
+        import os, pandas as pd, logging
+        _logger = logging.getLogger(__name__)
         if not self.enabled:
             raise RuntimeError('LiveExecutor not enabled. Set LIVE_MODE=1 and LIVE_CONFIRM="I CONFIRM LIVE" and valid keys.')
-        
+
         # basic validation
         if side not in ('buy','sell'):
             raise ValueError('side must be buy or sell')
-        
+
         if not ticker or not ticker.startswith('KRW-'):
             raise ValueError(f'Invalid ticker: {ticker}. Must be in format KRW-XXX')
-        
+
         # 환경 변수 로드
         self._load_env_flags()
-        
+
         # ENABLE_AUTO_LIVE 플래그 확인 (실제 주문 실행 여부)
         if not self.ENABLE_AUTO_LIVE:
             raise RuntimeError('ENABLE_AUTO_LIVE=0 - 자동 라이브 거래가 비활성화되어 있습니다. 실제 주문을 실행하지 않습니다.')
-        
-        # get KRW balance for buys or asset balance for sells as needed
-        # place limit order for safety
+
+        # --- 슬리피지 방어: 주문 전 실시간 가격 검증 (BTC 급변 방어) ---
         try:
-            # wrap network calls with simple retry/backoff
+            import pyupbit
+            realtime_price = pyupbit.get_current_price(ticker)
+            if realtime_price and price and price > 0:
+                slippage = abs(realtime_price - price) / price
+                if slippage > 0.03:  # 3% 이상 괴리 시 주문 거부
+                    msg = (f'슬리피지 방어: {ticker} 참조가격({price:,.0f}) vs '
+                           f'실시간({realtime_price:,.0f}) 괴리 {slippage*100:.1f}% > 3%')
+                    _logger.warning('[SLIPPAGE GUARD] %s', msg)
+                    self._notify_telegram(f'⚠️ {msg}')
+                    raise RuntimeError(msg)
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # 실시간 가격 조회 실패 시 주문 계속 진행
+
+        try:
             import time
             max_retries = 3
             for attempt in range(1, max_retries+1):
@@ -1086,96 +1694,111 @@ class LiveExecutor:
                             if b.get('currency') == 'KRW':
                                 krw_bal = float(b.get('balance') or 0)
                                 break
-                        
+
+                        # 잔고 부족 사전 차단
+                        if krw_bal < 5000:
+                            raise ValueError(f'KRW 잔고 부족: {krw_bal:,.0f}원')
+
                         # 포지션 크기 제한 확인 (spend = 사용할 원화 총액)
                         spend_float = krw_bal * min(size_pct, self.MAX_POSITION_PCT)
-                        
+
                         # daily loss guard
                         try:
                             if self._daily_loss_exceeded(additional_spend=spend_float):
                                 raise RuntimeError('Daily loss limit exceeded, blocking new buys')
+                        except RuntimeError:
+                            raise
                         except Exception:
                             pass
-                        
+
                         # 최소 주문 금액 확인 (업비트 최소 주문 typically 5000 KRW)
+                        min_total = 5000
                         try:
                             import requests
                             r = requests.get(f'https://api.upbit.com/v1/orders/chance?market={ticker}', timeout=5)
                             data = r.json()
-                            min_total = float(data.get('market', {}).get('bid', {}).get('min_total') or 
-                                            data.get('market', {}).get('ask', {}).get('min_total') or 1000)
+                            min_total = float(data.get('market', {}).get('bid', {}).get('min_total') or
+                                            data.get('market', {}).get('ask', {}).get('min_total') or 5000)
                         except Exception:
-                            min_total = 5000
-                        
+                            pass
+
                         if spend_float < min_total:
                             raise ValueError(f'주문 금액이 최소 주문 금액({min_total}원)보다 작습니다.')
-                        
-                        # 시장가 매수: 업비트 API는 원화 총액(spend)만 받음. 지정가 미체결 방지.
-                        spend = round(spend_float)  # KRW 정수 원 단위
+
+                        spend = round(spend_float)
                         resp = self.client.buy_market_order(ticker, spend)
-                        
-                        # Telegram 알림 (시장가이므로 체결가 대신 주문 원화 표시)
+
                         self._notify_telegram(f'🟢 시장가 매수: {ticker}, 주문 금액: {spend:,.0f}원')
-                        
+
                     else:
-                        # for sell, we need the asset balance
                         bal_list = self.client.get_balances()
                         asset_bal = 0.0
                         asset_currency = ticker.split('-')[1]
-                        
+
                         for b in bal_list:
                             if b.get('currency') == asset_currency:
                                 asset_bal = float(b.get('balance') or 0)
                                 break
-                        
+
                         if asset_bal <= 0:
                             raise ValueError(f'{asset_currency} 잔고가 없습니다.')
-                        
-                        sell_qty = asset_bal * size_pct if size_pct <= 1 else size_pct
+
+                        sell_qty = asset_bal * size_pct if size_pct <= 1 else min(size_pct, asset_bal)
                         if sell_qty <= 0:
                             raise ValueError('매도 수량이 0입니다.')
-                        
+
                         resp = self.client.sell_market_order(ticker, sell_qty)
-                        
-                        # Telegram 알림
+
                         self._notify_telegram(f'🔴 매도 주문: {ticker}, 수량: {sell_qty:.6f}')
-                    
-                    # parse response: pyupbit returns dict with 'uuid' or similar
+
+                    # parse response
                     order_id = None
                     if isinstance(resp, dict):
-                        order_id = resp.get('uuid') or resp.get('id') or resp.get('uuid')
-                    
-                    # buy: 시장가라 체결가/수량은 응답 기준. 로깅용으로 price=참고가, qty=예상 수량
+                        order_id = resp.get('uuid') or resp.get('id')
+                        # API 에러 응답 감지
+                        if resp.get('error'):
+                            raise RuntimeError(f"Upbit API error: {resp.get('error')}")
+
                     rec = {
-                        'time': pd.Timestamp.now().isoformat(), 
-                        'side': side, 
-                        'price': price, 
+                        'time': pd.Timestamp.now().isoformat(),
+                        'side': side,
+                        'price': price,
                         'qty': (spend / price) if (side == 'buy' and price) else sell_qty,
                         'ticker': ticker
                     }
                     if side == 'buy':
-                        rec['spend'] = spend  # 시장가 매수 시 실제 주문 원화
-                    
-                    # persist order with order_id if available
+                        rec['spend'] = spend
+
                     try:
                         self._persist_order({**rec, 'order_id': order_id}, status='submitted')
                     except Exception:
                         pass
-                    
+
                     return resp
+                except (RuntimeError, ValueError) as e:
+                    # 비즈니스 로직 에러는 재시도하지 않고 즉시 전파
+                    raise
                 except Exception as e:
                     error_msg = f'Live order attempt {attempt} failed: {e}'
-                    print(error_msg)
+                    _logger.warning(error_msg)
                     self._notify_telegram(f'⚠️ {error_msg}')
-                    
-                    if attempt < max_retries:
+
+                    # Rate Limit (429) 감지 시 더 긴 대기
+                    err_str = str(e).lower()
+                    if '429' in err_str or 'rate limit' in err_str or 'too many' in err_str:
+                        wait = min(60, 5 * (2 ** attempt))
+                        _logger.warning('[Rate Limit] %s초 대기 후 재시도...', wait)
+                        time.sleep(wait)
+                    elif attempt < max_retries:
                         time.sleep(2 ** attempt)
-                        continue
-                    else:
+
+                    if attempt >= max_retries:
+                        # 최종 실패 시 해당 티커 미체결 주문 정리
+                        self.cancel_all_open_orders(ticker)
                         raise
         except Exception as e:
             error_msg = f'Live order failed: {e}'
-            print(error_msg)
+            _logger.error(error_msg)
             self._notify_telegram(f'❌ {error_msg}')
             raise
 
@@ -1335,6 +1958,7 @@ class LiveExecutor:
 
 
 
+
 ### 파일명: trading_bot/main.py ###
 
 
@@ -1368,6 +1992,7 @@ def panic():
             new.append('ENABLE_AUTO_LIVE=0\n')
         with open(dotenv_path,'w') as f:
             f.writelines(new)
+        os.environ['ENABLE_AUTO_LIVE'] = '0'
         return jsonify({'ok':True,'msg':'AUTO LIVE disabled'})
     except Exception as e:
         return jsonify({'ok':False,'error':str(e)})
@@ -1904,6 +2529,7 @@ if __name__ == '__main__':
     print('Executor cash, positions:', execu.cash, execu.positions)
 
 
+
 ### 파일명: trading_bot/models.py ###
 
 """
@@ -2087,6 +2713,7 @@ class PositionState(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+
 ### 파일명: trading_bot/monitor.py ###
 
 import os
@@ -2103,11 +2730,12 @@ TELEGRAM_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ENV = "TELEGRAM_CHAT_ID"
 
 
-def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[str] = None, parse_mode: Optional[str] = None) -> Tuple[bool, Optional[str]]:
     """Send a Telegram message via bot API (one-way notifications).
 
     Compatible with telegram_bot.py listener: both use the same Bot API; alerts and chat commands work independently.
     Expects environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID if token/chat_id not provided.
+    parse_mode: None (plain text) | 'HTML' | 'Markdown' — passed directly to Telegram API.
     Returns (True, None) on success, (False, error_message) on failure. Retries without proxy on proxy/connection errors if TELEGRAM_USE_PROXY set.
     """
     token = token or os.getenv(TELEGRAM_TOKEN_ENV)
@@ -2118,6 +2746,8 @@ def send_telegram(message: str, token: Optional[str] = None, chat_id: Optional[s
         )
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     def _post(proxies=None):
         return requests.post(url, json=payload, timeout=10, proxies=proxies or {})
 
@@ -2157,6 +2787,7 @@ if __name__ == '__main__':
         print("Telegram not configured:", ex)
 
 
+
 ### 파일명: trading_bot/param_manager.py ###
 
 """
@@ -2194,6 +2825,7 @@ def get_best_params():
         session.close()
 
 
+
 ### 파일명: trading_bot/risk.py ###
 
 def check_daily_loss(cash, starting_cash, daily_loss_limit_pct=0.03):
@@ -2205,6 +2837,63 @@ def check_total_drawdown(current_value, peak_value, max_drawdown_pct=0.15):
     return draw <= max_drawdown_pct
 
 
+# [NEW] Order 테이블에서 실제 연속 손실 횟수 계산 (Paper/Live 공통)
+def get_consecutive_losses() -> int:
+    """
+    가장 최근 체결(Order) 기준으로 연속 손실 횟수 반환.
+    손실 = sell 체결가 < raw.entry_price.
+    계산 실패 시 0 반환.
+    """
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import Order
+        session = get_session()
+        try:
+            rows = session.query(Order).filter(Order.side == 'sell').order_by(Order.ts.desc()).limit(50).all()
+            if not rows:
+                return 0
+            consecutive = 0
+            for r in rows:
+                raw = r.raw if isinstance(r.raw, dict) else {}
+                entry_price = float(raw.get('entry_price', 0) or 0)
+                sell_price = float(r.price or 0)
+                if entry_price <= 0:
+                    break
+                if sell_price < entry_price:
+                    consecutive += 1
+                else:
+                    break
+            return consecutive
+        finally:
+            session.close()
+    except Exception:
+        return 0
+
+
+# [NEW] 최근 lookback 건의 sell 체결 중 수익 비율 반환
+def get_win_rate(lookback: int = 20) -> float:
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import Order
+        session = get_session()
+        try:
+            rows = session.query(Order).filter(Order.side == 'sell').order_by(Order.ts.desc()).limit(lookback).all()
+            if not rows:
+                return 0.5
+            wins = 0
+            for r in rows:
+                raw = r.raw if isinstance(r.raw, dict) else {}
+                entry_price = float(raw.get('entry_price', 0) or 0)
+                sell_price = float(r.price or 0)
+                if entry_price > 0 and sell_price >= entry_price:
+                    wins += 1
+            return wins / len(rows)
+        finally:
+            session.close()
+    except Exception:
+        return 0.5
+
+
 def calculate_adjusted_position_size(
     account_value,
     risk_per_trade_pct=0.02,
@@ -2212,15 +2901,37 @@ def calculate_adjusted_position_size(
     use_dynamic_adjustment=True,
 ):
     """포지션 크기(KRW) 및 리스크 조정 정보 반환. (strategy 호환)"""
+    # [IMPROVED] 실제 연속 손실 / 승률 기반 포지션 조정
+    consecutive_losses = get_consecutive_losses() if use_dynamic_adjustment else 0
+    win_rate = get_win_rate() if use_dynamic_adjustment else 0.5
+
+    multiplier = 1.0
+    is_defensive = False
+
+    if consecutive_losses >= 4:
+        multiplier = 0.0
+        is_defensive = True
+    elif consecutive_losses == 3:
+        multiplier = 0.5
+        is_defensive = True
+    elif consecutive_losses == 2:
+        multiplier = 0.75
+        is_defensive = True
+    elif win_rate < 0.4:
+        multiplier = 0.75
+        is_defensive = True
+
     base_size = account_value * risk_per_trade_pct / (stop_loss_pct or 0.05)
+    adjusted = base_size * multiplier
+
     risk_adjustments = {
-        'position_size_multiplier': 1.0,
-        'is_defensive_mode': False,
-        'consecutive_losses': 0,
-        'win_rate': 0.0,
+        'position_size_multiplier': multiplier,
+        'is_defensive_mode': is_defensive,
+        'consecutive_losses': consecutive_losses,
+        'win_rate': round(win_rate, 3),
         'atr_trailing_multiplier': 2.0,
     }
-    return base_size, risk_adjustments
+    return adjusted, risk_adjustments
 
 
 ### 파일명: trading_bot/scale_out_manager.py ###
@@ -2293,6 +3004,7 @@ def set_scale_out_stage(ticker: str, new_stage: int, current_avg_buy_price: floa
         session.close()
 
 
+
 ### 파일명: trading_bot/strategy.py ###
 
 import json
@@ -2313,6 +3025,22 @@ def _json_default(obj):
     if isinstance(obj, (np.ndarray, pd.Series)):
         return obj.tolist()
     raise TypeError(f'Object of type {type(obj).__name__} is not JSON serializable')
+
+
+def _candle_bucket_seconds(timeframe: str) -> int:
+    """Convert timeframe string to candle bucket size in seconds for duplicate-signal detection."""
+    if not timeframe:
+        return 3600
+    tf = str(timeframe).strip().lower()
+    if tf == 'day':
+        return 86400
+    if tf.startswith('minute'):
+        try:
+            n = int(tf.replace('minute', '').strip() or 60)
+            return max(60, n * 60)
+        except ValueError:
+            pass
+    return 3600
 
 
 def sma(series, window):
@@ -2396,10 +3124,27 @@ def load_cached_indicators(ticker: str, timeframe: str, count: int = 200) -> pd.
                     row['bb_width'] = indicators['bb_width']
             
             data.append(row)
-        
+
         df = pd.DataFrame(data)
-        if len(df) > 0:
-            df['time'] = pd.to_datetime(df['time'])
+        if len(df) == 0:
+            return df
+        df['time'] = pd.to_datetime(df['time'])
+        # Merge OHLCV volume so vol_ratio is meaningful (TechnicalIndicator has no volume)
+        try:
+            from trading_bot.data_manager import load_ohlcv_from_db
+            df_ohlcv = load_ohlcv_from_db(ticker, timeframe, count=count)
+            if df_ohlcv is not None and not df_ohlcv.empty and 'volume' in df_ohlcv.columns and 'time' in df_ohlcv.columns:
+                ohlcv_sub = df_ohlcv[['time', 'volume']].copy()
+                ohlcv_sub['time'] = pd.to_datetime(ohlcv_sub['time'])
+                df['_time'] = pd.to_datetime(df['time'])
+                if hasattr(df['_time'].dtype, 'tz') and df['_time'].dt.tz is not None:
+                    df['_time'] = df['_time'].dt.tz_localize(None)
+                if hasattr(ohlcv_sub['time'].dtype, 'tz') and ohlcv_sub['time'].dt.tz is not None:
+                    ohlcv_sub['time'] = ohlcv_sub['time'].dt.tz_localize(None)
+                df = df.merge(ohlcv_sub.rename(columns={'time': '_time'}), on='_time', how='left')
+                df.drop(columns=['_time'], inplace=True)
+        except Exception:
+            pass
         return df
     except Exception as e:
         print(f'⚠️ 캐싱된 지표 로드 실패 ({ticker}, {timeframe}): {e}')
@@ -2417,6 +3162,7 @@ def generate_comprehensive_signal_with_logging(
     position_qty: float = 0.0,
     current_roi: float = 0.0,
     scale_out_stage: int = 0,
+    avg_buy_price: float = 0.0,  # [NEW] ATR Scale-Out 기준 계산용
 ) -> Dict:
     """
     종합 신호 판단 및 상세 로깅
@@ -2455,7 +3201,27 @@ def generate_comprehensive_signal_with_logging(
         from trading_bot.models import Signal, AnalysisResult
         from trading_bot.risk import calculate_adjusted_position_size
         from trading_bot.data_manager import load_ohlcv_from_db, load_higher_timeframe_indicators
+        from trading_bot.config import (
+            RSI_BUY_MIN, RSI_BUY_MAX, RSI_SELL_MIN,
+            SCALE_OUT_ATR_MULT_1, SCALE_OUT_ATR_MULT_2,
+            SCALE_OUT_ROI_FALLBACK_1, SCALE_OUT_ROI_FALLBACK_2,
+            VOL_SCALE_HIGH, VOL_SCALE_MID,
+        )
         import json
+
+        # [IMPROVED] ATR 기반 동적 Scale-Out (폴백: ROI 고정값)
+        def _should_scale_out(stage_target, avg_buy, cur_price, atr_v, so_stage):
+            if so_stage >= stage_target:
+                return False
+            if avg_buy and avg_buy > 0 and atr_v and atr_v > 0:
+                mult = SCALE_OUT_ATR_MULT_1 if stage_target == 1 else SCALE_OUT_ATR_MULT_2
+                target_price = avg_buy + atr_v * mult
+                return cur_price >= target_price
+            if avg_buy and avg_buy > 0:
+                roi = (cur_price - avg_buy) / avg_buy * 100
+                th = SCALE_OUT_ROI_FALLBACK_1 if stage_target == 1 else SCALE_OUT_ROI_FALLBACK_2
+                return roi >= th
+            return False
         
         # 1) 캐싱된 지표 로드
         df_indicators = load_cached_indicators(ticker, timeframe, count=200)
@@ -2494,26 +3260,34 @@ def generate_comprehensive_signal_with_logging(
             else:
                 current_price = 0.0
         
-        # 2) Regime 판단 — 완성 봉(closed_candle, prev_closed_candle) 기준
+        # 2) Regime 판단 — ADX, slope, BB width (squeeze) to reduce whipsaws; add transition
         adx = float(closed_candle.get('adx', 0))
         adx_prev = float(prev_closed_candle.get('adx', 0))
         adx_slope = adx - adx_prev
-        if adx > adx_trend_threshold:
+        bb_width = float(closed_candle.get('bb_width', 0) or 0)
+        # thresholds: squeeze = small BB width; avoid calling trend in low-vol chop
+        BB_SQUEEZE_MAX = 0.05
+        BB_TREND_MIN = 0.02
+        ADX_NEAR_MARGIN = 3.0
+        if adx <= adx_trend_threshold and bb_width > 0 and bb_width < BB_SQUEEZE_MAX:
+            regime = 'range'
+        elif adx > adx_trend_threshold and bb_width >= BB_TREND_MIN:
             if adx_slope < 0:
                 regime = 'weakening_trend'
             else:
                 regime = 'trend'
         else:
-            regime = 'range'
-        
+            regime = 'transition'
+        decision_reason_parts = []
+        decision_reason_parts.append(f"Regime:{regime} (ADX:{adx:.1f} slope:{adx_slope:+.1f} bb_width:{bb_width:.3f})")
+
         # 3) 신호 생성: EMA/크로스는 완성 봉 기준, BB 터치는 closed_candle의 BB + 실시간 current_price
         # Scale-Out 및 정규 매도 시 sell_size_pct, next_scale_out_stage (반환용)
         signal = 'hold'
         sell_size_pct = 1.0
         buy_size_pct = 1.0
         next_scale_out_stage = None
-        decision_reason_parts = []
-        
+
         ema_short = closed_candle.get('ema_short', 0)
         ema_long = closed_candle.get('ema_long', 0)
         rsi = closed_candle.get('rsi', 50)
@@ -2521,11 +3295,31 @@ def generate_comprehensive_signal_with_logging(
         current_volume = float(closed_candle.get('volume', 0))
         vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
         vol_ratio = current_volume / vol_ma if vol_ma > 0 else 0.0
+
+        def volume_ok(vol_ratio_val, regime_name, is_bull, weakening=False, decoupling=False):
+            """Single volume gate: returns (passed, required_threshold). Use same vol_ratio everywhere."""
+            if decoupling:
+                req = 1.5
+                return (vol_ratio_val >= req, req)
+            if weakening:
+                req = 1.2
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'trend':
+                req = 0.8 if is_bull else 1.0
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'range':
+                req = 0.8
+                return (vol_ratio_val >= req, req)
+            if regime_name == 'transition':
+                req = 1.0
+                return (vol_ratio_val >= req, req)
+            return (True, 0.0)
+
         # 볼린저: 완성 봉의 밴드 값 사용. 터치 여부는 실시간 current_price로 판단(기민한 반응)
         bb_lower = closed_candle.get('bb_lower', 0)
         bb_upper = closed_candle.get('bb_upper', 0)
         bb_middle = closed_candle.get('bb_middle', 0)
-        bb_width = float(closed_candle.get('bb_width', 0) or 0)
+        # bb_width already set in regime block above
         # OBV 기반 Smart Money 흐름
         obv = float(closed_candle.get('obv', 0) or 0)
         obv_sma = float(closed_candle.get('obv_sma', 0) or 0)
@@ -2552,9 +3346,24 @@ def generate_comprehensive_signal_with_logging(
                 atr_val = float(_atr_raw)
         except (TypeError, ValueError):
             pass
+        # [IMPROVED] 수익 구간별 ATR 배수로 트레일링 스탑 계산
+        try:
+            from trading_bot.config import TS_MULT_LOW, TS_MULT_MID, TS_MULT_HIGH
+        except Exception:
+            TS_MULT_LOW, TS_MULT_MID, TS_MULT_HIGH = 3.0, 2.0, 1.5
+        if current_roi >= 15.0:
+            ts_mult = TS_MULT_HIGH
+        elif current_roi >= 5.0:
+            ts_mult = TS_MULT_MID
+        else:
+            ts_mult = TS_MULT_LOW
         trailing_stop_price = None
         if recent_highest is not None and atr_val is not None and atr_val > 0:
-            trailing_stop_price = recent_highest - (atr_val * 2.5)
+            trailing_stop_price = recent_highest - (atr_val * ts_mult)
+            if position_qty > 0:
+                decision_reason_parts.append(
+                    f'TrailingStop: {trailing_stop_price:.0f} (최고가{recent_highest:.0f} - ATR×{ts_mult})'
+                )
 
         # ----- Whale Accumulation (Smart Money) Detection -----
         accumulation_mode = False
@@ -2572,17 +3381,23 @@ def generate_comprehensive_signal_with_logging(
             )
         
         # 추세장: Scale-Out(25-25-50) → ATR Trailing Stop → EMA 골든/데드 크로스
+        avg_buy = float(avg_buy_price or 0.0)
+        atr_for_scale = float(atr_val or 0.0) if atr_val is not None else 0.0
         if regime == 'trend':
-            if position_qty > 0 and current_roi >= 10.0 and scale_out_stage < 2:
+            if position_qty > 0 and _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
-                sell_size_pct = 0.33  # 25% of original ≈ 1/3 of remaining 75%
+                sell_size_pct = 0.33
                 next_scale_out_stage = 2
-                decision_reason_parts.append("Scale-Out Stage 2: ROI >= 10.0%, taking 25% profit.")
-            elif position_qty > 0 and current_roi >= 5.0 and scale_out_stage < 1:
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 2: ATR 배수 {SCALE_OUT_ATR_MULT_2}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_2}%)'
+                )
+            elif position_qty > 0 and _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
-                sell_size_pct = 0.25  # 25% of original position
+                sell_size_pct = 0.25
                 next_scale_out_stage = 1
-                decision_reason_parts.append("Scale-Out Stage 1: ROI >= 5.0%, taking 25% profit.")
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 1: ATR 배수 {SCALE_OUT_ATR_MULT_1}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_1}%)'
+                )
             elif current_price is not None and current_price > 0 and trailing_stop_price is not None and current_price < trailing_stop_price:
                 signal = 'sell'
                 sell_size_pct = 1.0
@@ -2595,28 +3410,20 @@ def generate_comprehensive_signal_with_logging(
                     prev_ema_short = 0
                 if pd.isna(prev_ema_long):
                     prev_ema_long = 0
-                if ema_short > ema_long and prev_ema_short <= prev_ema_long:
+                # [IMPROVED] RSI가 과매도 탈출~과매수 미만 구간일 때만 매수
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
                     if not mtf_blocked:
-                        current_volume = float(closed_candle.get('volume', 0))
-                        vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                        required_vol_ratio = 0.8 if is_global_bull_market else None
-                        if required_vol_ratio is not None:
-                            if current_volume >= vol_ma * required_vol_ratio:
-                                signal = 'buy'
-                                decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스')
-                                decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) > 장기({ema_long:.0f})')
-                                decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {vol_ratio:.1f}x >= {required_vol_ratio}x)')
-                                if rsi < 70:
-                                    decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 아님')
-                            else:
-                                signal = 'hold'
-                                decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < {required_vol_ratio}x)')
-                        else:
+                        ok, req = volume_ok(vol_ratio, 'trend', is_global_bull_market, weakening=False, decoupling=False)
+                        if ok:
                             signal = 'buy'
                             decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스')
                             decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) > 장기({ema_long:.0f})')
-                            if rsi < 70:
-                                decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 아님')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            signal = 'hold'
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 elif ema_short < ema_long and prev_ema_short >= prev_ema_long:
@@ -2626,16 +3433,20 @@ def generate_comprehensive_signal_with_logging(
                     decision_reason_parts.append(f'추세장(ADX={adx:.1f}) 완성봉 기준 EMA 데드크로스')
                     decision_reason_parts.append(f'EMA 단기({ema_short:.0f}) < 장기({ema_long:.0f})')
         elif regime == 'weakening_trend':
-            if position_qty > 0 and current_roi >= 10.0 and scale_out_stage < 2:
+            if position_qty > 0 and _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
                 sell_size_pct = 0.33
                 next_scale_out_stage = 2
-                decision_reason_parts.append("Scale-Out Stage 2: ROI >= 10.0%, taking 25% profit.")
-            elif position_qty > 0 and current_roi >= 5.0 and scale_out_stage < 1:
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 2: ATR 배수 {SCALE_OUT_ATR_MULT_2}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_2}%)'
+                )
+            elif position_qty > 0 and _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
                 signal = 'sell'
                 sell_size_pct = 0.25
                 next_scale_out_stage = 1
-                decision_reason_parts.append("Scale-Out Stage 1: ROI >= 5.0%, taking 25% profit.")
+                decision_reason_parts.append(
+                    f'Scale-Out Stage 1: ATR 배수 {SCALE_OUT_ATR_MULT_1}x 도달 (폴백ROI {SCALE_OUT_ROI_FALLBACK_1}%)'
+                )
             elif current_price is not None and current_price > 0 and trailing_stop_price is not None and current_price < trailing_stop_price:
                 signal = 'sell'
                 sell_size_pct = 1.0
@@ -2648,22 +3459,18 @@ def generate_comprehensive_signal_with_logging(
                     prev_ema_short = 0
                 if pd.isna(prev_ema_long):
                     prev_ema_long = 0
-                if ema_short > ema_long and prev_ema_short <= prev_ema_long:
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
                     if not mtf_blocked:
-                        current_volume = float(closed_candle.get('volume', 0))
-                        vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                        required_vol_ratio = 1.2 if is_global_bull_market else None
-                        if required_vol_ratio is not None:
-                            if current_volume >= vol_ma * required_vol_ratio:
-                                signal = 'buy'
-                                decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스, 비중 50%')
-                                decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {vol_ratio:.1f}x >= {required_vol_ratio}x)')
-                            else:
-                                signal = 'hold'
-                                decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < {required_vol_ratio}x)')
-                        else:
+                        ok, req = volume_ok(vol_ratio, 'weakening_trend', is_global_bull_market, weakening=True, decoupling=False)
+                        if ok:
                             signal = 'buy'
                             decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 골든크로스, 비중 50%')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            signal = 'hold'
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 elif ema_short < ema_long and prev_ema_short >= prev_ema_long:
@@ -2671,14 +3478,54 @@ def generate_comprehensive_signal_with_logging(
                     sell_size_pct = 1.0
                     next_scale_out_stage = 0
                     decision_reason_parts.append(f'약세 추세장(ADX={adx:.1f}) 완성봉 기준 EMA 데드크로스')
-        else:
-            # 횡보장: 매수=BB하단 터치(실시간), 매도=캔들 고가가 BB상단 강하게 터치한 이벤트만 (무한 sell 방지)
-            if current_price and current_price > 0 and bb_lower and bb_upper and bb_upper > bb_lower:
-                if current_price <= bb_lower * 1.01:
-                    if not mtf_blocked:
+        elif regime == 'transition':
+            # Default hold in transition; allow only strong confirmation with reduced size
+            if position_qty > 0:
+                if _should_scale_out(2, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
+                    signal = 'sell'
+                    sell_size_pct = 0.33
+                    next_scale_out_stage = 2
+                    decision_reason_parts.append("Scale-Out Stage 2 (transition)")
+                elif _should_scale_out(1, avg_buy, current_price or 0, atr_for_scale, scale_out_stage):
+                    signal = 'sell'
+                    sell_size_pct = 0.25
+                    next_scale_out_stage = 1
+                    decision_reason_parts.append("Scale-Out Stage 1 (transition)")
+                elif current_price and trailing_stop_price and current_price < trailing_stop_price:
+                    signal = 'sell'
+                    sell_size_pct = 1.0
+                    next_scale_out_stage = 0
+            # Optional: allow buy in transition only with strong confirmation and reduced size
+            elif (ema_short or ema_long) and not (pd.isna(ema_short) or pd.isna(ema_long)):
+                prev_ema_short = prev_closed_candle.get('ema_short', 0)
+                prev_ema_long = prev_closed_candle.get('ema_long', 0)
+                if pd.isna(prev_ema_short): prev_ema_short = 0
+                if pd.isna(prev_ema_long): prev_ema_long = 0
+                if (ema_short > ema_long and prev_ema_short <= prev_ema_long and not mtf_blocked
+                        and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX):
+                    ok, req = volume_ok(vol_ratio, 'transition', is_global_bull_market, weakening=False, decoupling=False)
+                    if ok:
                         signal = 'buy'
-                        decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) BB하단 터치(완성봉 밴드+실시간가격)')
-                        decision_reason_parts.append(f'현재가({current_price:.0f}) <= 하단({bb_lower:.0f})')
+                        buy_size_pct = 0.5
+                        decision_reason_parts.append(f'Transition EMA 골든크로스 (비중 50%, Vol {vol_ratio:.1f}x >= {req}x)')
+                        decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                    elif not ok:
+                        decision_reason_parts.append(f'Transition: Volume filter (Vol {vol_ratio:.1f}x < req {req}x)')
+        else:
+            # 횡보장(range): 매수=BB하단 터치 + RSI 필터 + volume gate
+            if current_price and current_price > 0 and bb_lower and bb_upper and bb_upper > bb_lower:
+                # [IMPROVED] BB 하단 터치 + RSI 필터
+                if current_price <= bb_lower * 1.01 and RSI_BUY_MIN <= rsi <= RSI_BUY_MAX:
+                    if not mtf_blocked:
+                        ok, req = volume_ok(vol_ratio, 'range', is_global_bull_market, weakening=False, decoupling=False)
+                        if ok:
+                            signal = 'buy'
+                            decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) BB하단 터치(완성봉 밴드+실시간가격)')
+                            decision_reason_parts.append(f'현재가({current_price:.0f}) <= 하단({bb_lower:.0f})')
+                            decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
+                            decision_reason_parts.append(f'RSI({rsi:.1f}) 필터 통과 [{RSI_BUY_MIN}~{RSI_BUY_MAX}]')
+                        else:
+                            decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     else:
                         signal = 'hold'
                 else:
@@ -2694,6 +3541,10 @@ def generate_comprehensive_signal_with_logging(
                             decision_reason_parts.append(f'횡보장(ADX={adx:.1f}) 완성봉 고가 BB상단 터치 이벤트')
                             decision_reason_parts.append(f'고가({closed_high:.0f}) >= 상단({bb_upper:.0f}), 직전봉 미터치')
                     # (기존: current_price >= bb_upper 상태만으로 매도 → 제거하여 반복 sell 방지)
+
+        # [NEW] RSI 과매수 구간 매도 강화 (보유 포지션 있고, 이미 sell 신호 발생 시)
+        if signal == 'sell' and position_qty > 0 and rsi >= RSI_SELL_MIN:
+            decision_reason_parts.append(f'RSI({rsi:.1f}) 과매수 구간 매도 강화')
         
         # 어떤 신호가 나왔든, 디버깅을 위해 마지막에 항상 볼륨 비율 정보를 부가
         decision_reason_parts.append(f'[Vol: {vol_ratio:.1f}x]')
@@ -2715,44 +3566,62 @@ def generate_comprehensive_signal_with_logging(
         if accumulation_mode and position_size > 0:
             position_size = position_size * 0.5
         
-        # 약세 추세장일 경우 포지션 크기 추가 축소 (50%)
-        if regime == 'weakening_trend' and signal == 'buy':
+        # 약세 추세장 또는 transition 매수 시 포지션 크기 축소 (50%)
+        if (regime == 'weakening_trend' or regime == 'transition') and signal == 'buy':
             position_size = position_size * 0.5
             risk_adjustments['weakening_trend_reduction'] = True
             risk_adjustments['position_size_multiplier'] = risk_adjustments.get('position_size_multiplier', 1.0) * 0.5
 
-        # BTC 거시 장세 필터 + 경주마(디커플링) 예외: 하락장에서도 ADX>=40 초강세는 예외 매수(비중 50%). 디커플링 시 볼륨 1.5x 필수.
+        # [NEW] 변동성 기반 포지션 자동 축소
+        try:
+            atr_series = df_indicators['atr'].dropna().tail(20)
+            avg_atr_20 = float(atr_series.mean()) if len(atr_series) >= 5 else 0.0
+        except Exception:
+            avg_atr_20 = 0.0
+        vol_scale_multiplier = 1.0
+        if avg_atr_20 > 0 and atr_val and atr_val > 0:
+            atr_ratio = atr_val / avg_atr_20
+            if atr_ratio >= VOL_SCALE_HIGH:
+                vol_scale_multiplier = 0.5
+                decision_reason_parts.append(f'변동성 급등(ATR {atr_ratio:.1f}x) → 포지션 50% 축소')
+            elif atr_ratio >= VOL_SCALE_MID:
+                vol_scale_multiplier = 0.75
+                decision_reason_parts.append(f'변동성 상승(ATR {atr_ratio:.1f}x) → 포지션 25% 축소')
+        if signal == 'buy' and vol_scale_multiplier < 1.0:
+            position_size = position_size * vol_scale_multiplier
+            risk_adjustments['vol_scale_multiplier'] = vol_scale_multiplier
+
+        # BTC 거시 장세 필터 + 경주마(디커플링) 예외: 하락장에서도 ADX>=40 초강세는 예외 매수(비중 50%). 볼륨 1.5x 필수.
         if not is_global_bull_market and signal == 'buy':
             if adx >= 40.0:
-                _vol = float(closed_candle.get('volume', 0))
-                _vol_ma = max(1.0, float(closed_candle.get('volume_ma', 1)))
-                required_vol_ratio = 1.5
-                if _vol >= _vol_ma * required_vol_ratio:
+                ok, req = volume_ok(vol_ratio, 'trend', False, weakening=False, decoupling=True)
+                if ok:
                     position_size = position_size * 0.5
                     risk_adjustments['btc_bear_decoupling_bypass'] = True
                     risk_adjustments['position_size_multiplier'] = risk_adjustments.get('position_size_multiplier', 1.0) * 0.5
                     decision_reason_parts.append('BTC 하락장이지만 초강세(ADX>=40) 감지로 예외 매수 (비중 50% 축소)')
-                    decision_reason_parts.append(f'Smart Volume confirmed (Vol ratio: {_vol/_vol_ma:.1f}x >= {required_vol_ratio}x)')
+                    decision_reason_parts.append(f'Smart Volume (Vol {vol_ratio:.1f}x >= {req}x)')
                     decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
                 else:
                     signal = 'hold'
-                    decision_reason_parts.append(f'Volume filter failed (Vol ratio: {_vol/_vol_ma:.1f}x < {required_vol_ratio}x)')
+                    decision_reason_parts.append(f'Volume filter failed (Vol ratio: {vol_ratio:.1f}x < req {req}x)')
                     decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
             else:
                 signal = 'hold'
                 decision_reason_parts.append('BTC 하락장 필터에 의한 매수 보류')
                 decision_reason = ' | '.join(decision_reason_parts) if decision_reason_parts else '신호 없음'
         
-        # 같은 봉에 대해 buy/sell 신호 중복 방지 (기준: 완성 봉 시각)
+        # 같은 봉에 대해 buy/sell 신호 중복 방지 (timeframe별 봉 버킷 사용)
         ts_now = closed_candle['time']
         if hasattr(ts_now, 'to_pydatetime'):
             ts_now = ts_now.to_pydatetime()
+        bucket_seconds = _candle_bucket_seconds(timeframe)
         session = get_session()
         try:
             skip_duplicate_write = False
             try:
                 if signal in ('buy', 'sell'):
-                    # 이 봉(ts_now)에 대해 이미 buy/sell 기록이 있는지 확인
+                    # 이 봉(ts_now)에 대해 이미 buy/sell 기록이 있는지 확인 (동일 방향만 블록)
                     existing = session.query(AnalysisResult).filter(
                         AnalysisResult.ticker == ticker,
                         AnalysisResult.signal.in_(['buy', 'sell'])
@@ -2761,7 +3630,7 @@ def generate_comprehensive_signal_with_logging(
                         if t is None:
                             return None
                         try:
-                            return int(pd.Timestamp(t).timestamp()) // 3600  # 1시간 봉 기준 동일 봉
+                            return int(pd.Timestamp(t).timestamp()) // bucket_seconds
                         except Exception:
                             return None
                     ts_key = _norm(ts_now)
@@ -2863,13 +3732,32 @@ def generate_comprehensive_signal_with_logging(
 
         if signal in ('buy', 'sell'):
             try:
-                from trading_bot.ai_logger import ai_logger
-                _es = 0.0 if pd.isna(ema_short) else float(ema_short)
-                _el = 0.0 if pd.isna(ema_long) else float(ema_long)
-                _price = current_price if current_price is not None else 0.0
-                ai_logger.info(
-                    "[STRATEGY] %s | Signal:%s | Regime:%s | Price:%s | ADX:%.1f | EMA(S/L):%s/%s",
-                    ticker, signal, regime, _fmt_num(_price), adx, _fmt_num(_es), _fmt_num(_el),
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(
+                    event_type='STRATEGY',
+                    ticker=ticker,
+                    signal=signal,
+                    price=current_price,
+                    avg_buy_price=avg_buy_price,
+                    regime=regime,
+                    timeframe=timeframe,
+                    adx=adx,
+                    rsi=float(rsi) if not pd.isna(rsi) else None,
+                    atr=float(closed_candle.get('atr', 0)),
+                    vol_ratio=float(vol_ratio),
+                    position_size=position_size,
+                    size_pct=buy_size_pct if signal == 'buy' else sell_size_pct,
+                    decision_reason=decision_reason,
+                    roi=current_roi if current_roi else None,
+                    extra={
+                        'ema_short': float(ema_short) if not pd.isna(ema_short) else 0,
+                        'ema_long': float(ema_long) if not pd.isna(ema_long) else 0,
+                        'bb_lower': float(bb_lower),
+                        'bb_upper': float(bb_upper),
+                        'scale_out_stage': scale_out_stage,
+                        'is_global_bull_market': is_global_bull_market,
+                        'mtf_blocked': mtf_blocked,
+                    },
                 )
             except Exception:
                 pass
@@ -2891,6 +3779,7 @@ def generate_comprehensive_signal_with_logging(
                 'atr': float(closed_candle.get('atr', 0)),
                 'bb_lower': float(bb_lower),
                 'bb_upper': float(bb_upper),
+                'vol_ratio': float(vol_ratio),
             }
         }
     except Exception as e:
@@ -2905,9 +3794,11 @@ def generate_comprehensive_signal_with_logging(
         }
 
 
+
 ### 파일명: trading_bot/tasks/__init__.py ###
 
 # tasks package init
+
 
 
 ### 파일명: trading_bot/tasks/auto_summary.py ###
@@ -3047,6 +3938,7 @@ if __name__ == '__main__':
     main()
 
 
+
 ### 파일명: trading_bot/tasks/auto_trader.py ###
 
 #!/usr/bin/env python3
@@ -3112,6 +4004,28 @@ DEFAULT_COUNT = 200
 ACCOUNT_VALUE = float(os.environ.get('ACCOUNT_VALUE', '100000'))
 # 업비트 최소 주문 금액(원). 이 금액 미만 보유 시 매도 신호 무시(무의미한 반복 로깅 방지)
 MIN_ORDER_KRW = 5000
+
+# [NEW] 동적 포지션 사이징 환경 변수 상수
+RISK_PCT_BULL = float(os.environ.get('RISK_PCT_BULL', '0.05'))
+RISK_PCT_BEAR = float(os.environ.get('RISK_PCT_BEAR', '0.02'))
+MAX_PER_COIN_PCT = float(os.environ.get('MAX_PER_COIN_PCT', '0.20'))
+ATR_SL_MULT = float(os.environ.get('ATR_SL_MULT', '2.0'))
+
+
+# [NEW] 알림 레벨별 텔레그램 전송 헬퍼
+def _notify(msg: str, level: str = 'TRADE'):
+    """level이 TELEGRAM_ALERT_LEVEL 이상일 때만 텔레그램 전송. CRITICAL > TRADE > SUMMARY > OFF"""
+    try:
+        from trading_bot.config import TELEGRAM_ALERT_LEVEL
+        priority = {'CRITICAL': 3, 'TRADE': 2, 'SUMMARY': 1, 'OFF': 0}
+        if priority.get(level, 0) <= 0 or priority.get(TELEGRAM_ALERT_LEVEL, 2) <= 0:
+            return
+        if priority.get(level, 0) < priority.get(TELEGRAM_ALERT_LEVEL, 2):
+            return
+        from trading_bot.monitor import send_telegram
+        send_telegram(msg)
+    except Exception as e:
+        logger.debug('텔레그램 전송 생략 (%s): %s', level, e)
 
 
 def parse_args():
@@ -3218,7 +4132,7 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
     if current_price is None or current_price <= 0 or total_equity <= 0:
         return 0.0, 0.0, 0.0
 
-    risk_pct = 0.05 if is_global_bull_market else 0.02
+    risk_pct = RISK_PCT_BULL if is_global_bull_market else RISK_PCT_BEAR  # [IMPROVED]
     risk_amount = total_equity * risk_pct
 
     try:
@@ -3229,15 +4143,14 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
     if not (atr_val and atr_val > 0):
         sl_distance = current_price * 0.05
     else:
-        sl_distance = atr_val * 2.0
+        sl_distance = atr_val * ATR_SL_MULT  # [IMPROVED]
 
     if sl_distance <= 0:
         return 5000.0, risk_pct, 0.1
 
     target_quantity = risk_amount / sl_distance
     base_buy_krw = target_quantity * current_price
-
-    max_per_coin = total_equity * 0.20
+    max_per_coin = total_equity * MAX_PER_COIN_PCT  # [IMPROVED]
     bounded_buy_krw = min(max(base_buy_krw, MIN_ORDER_KRW), max_per_coin)
 
     try:
@@ -3302,6 +4215,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             position_qty=position_qty or 0.0,
             current_roi=current_roi,
             scale_out_stage=scale_out_stage,
+            avg_buy_price=avg_buy_price or 0.0,  # [NEW]
         )
     except Exception as e:
         logger.warning('[오류] %s — 신호 생성 중 예외: %s', ticker, str(e))
@@ -3314,6 +4228,65 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     indicators = result.get('indicators') or {}
     adx = float(indicators.get('adx', 0) or 0)
     atr = float(indicators.get('atr', 0) or 0)
+    regime = result.get('regime', '')
+    vol_ratio = float(indicators.get('vol_ratio', 0) or 0)
+
+    # ----- Balanced+: partial stop-loss (risk first), then DCA -----
+    try:
+        from trading_bot.balanced_plus import (
+            PARTIAL_STOP_1_ROI_PCT, PARTIAL_STOP_1_SELL_PCT,
+            PARTIAL_STOP_2_ROI_PCT, PARTIAL_STOP_2_SELL_PCT,
+            is_in_partial_stop_cooldown, log_execution_event,
+            TAG_PS1, TAG_PS2, TAG_EXEC_SELL,
+            DCA_ENABLED, DCA_TRIGGER_ROI_PCT, DCA_SIZE_MULTIPLIER, DCA_MIN_VOL_RATIO,
+            DCA_ALLOWED_REGIMES, DCA_MAX_PER_TICKER_PER_DAY, TAG_DCA_BUY,
+            is_in_buy_cooldown, is_in_dca_cooldown, count_tag_last_24h,
+        )
+        pos = position_qty or 0.0
+        full_exit = (signal == 'sell' and float(result.get('sell_size_pct', 1.0) or 1.0) >= 1.0)
+        # Partial stop: do not block full exit (ATR/dead cross); only add partial sells in loss territory
+        if pos > 0 and not full_exit and not is_in_partial_stop_cooldown(ticker):
+            if current_roi <= PARTIAL_STOP_2_ROI_PCT:
+                position_value_ps = (current_price or 0) * pos
+                if position_value_ps >= MIN_ORDER_KRW:
+                    try:
+                        executor.place_order('sell', current_price, size_pct=PARTIAL_STOP_2_SELL_PCT, ticker=ticker)
+                        logger.info('✅ %s 부분손절 PS2 실행 (ROI %.1f%%, 비중 %.0f%%)', ticker, current_roi, PARTIAL_STOP_2_SELL_PCT * 100)
+                        ai_logger.info('[EXECUTE] %s | ACTION:SELL | PS2 | ROI:%.1f%%', ticker, current_roi)
+                        log_execution_event(ticker, 'sell', TAG_PS2, current_price)
+                        return 'executed', None, None
+                    except Exception as e:
+                        logger.warning('[오류] %s — PS2 실행 실패: %s', ticker, str(e))
+            elif current_roi <= PARTIAL_STOP_1_ROI_PCT:
+                position_value_ps = (current_price or 0) * pos
+                if position_value_ps >= MIN_ORDER_KRW:
+                    try:
+                        executor.place_order('sell', current_price, size_pct=PARTIAL_STOP_1_SELL_PCT, ticker=ticker)
+                        logger.info('✅ %s 부분손절 PS1 실행 (ROI %.1f%%, 비중 %.0f%%)', ticker, current_roi, PARTIAL_STOP_1_SELL_PCT * 100)
+                        ai_logger.info('[EXECUTE] %s | ACTION:SELL | PS1 | ROI:%.1f%%', ticker, current_roi)
+                        log_execution_event(ticker, 'sell', TAG_PS1, current_price)
+                        return 'executed', None, None
+                    except Exception as e:
+                        logger.warning('[오류] %s — PS1 실행 실패: %s', ticker, str(e))
+        # DCA: only in trend, loss, volume ok, bull, cooldowns ok, under daily cap
+        if pos > 0 and DCA_ENABLED and regime in DCA_ALLOWED_REGIMES and is_global_bull_market:
+            if (current_roi <= DCA_TRIGGER_ROI_PCT and vol_ratio >= DCA_MIN_VOL_RATIO
+                    and not is_in_buy_cooldown(ticker) and not is_in_dca_cooldown(ticker)
+                    and count_tag_last_24h(ticker, TAG_DCA_BUY) < DCA_MAX_PER_TICKER_PER_DAY):
+                base_pct = max(0.01, min(1.0, position_size / ACCOUNT_VALUE)) if ACCOUNT_VALUE > 0 else 0.02
+                dca_pct = max(0.01, min(1.0, base_pct * DCA_SIZE_MULTIPLIER))
+                position_value_dca = (current_price or 0) * pos
+                if position_value_dca >= MIN_ORDER_KRW and (ACCOUNT_VALUE * dca_pct) >= MIN_ORDER_KRW:
+                    try:
+                        executor.place_order('buy', current_price, size_pct=dca_pct, ticker=ticker)
+                        logger.info('✅ %s DCA 매수 실행 (ROI %.1f%%, 비중 %.2f%%)', ticker, current_roi, dca_pct * 100)
+                        ai_logger.info('[EXECUTE] %s | ACTION:BUY | DCA_BUY | ROI:%.1f%%', ticker, current_roi)
+                        log_execution_event(ticker, 'buy', TAG_DCA_BUY, current_price)
+                        return 'executed', None, None
+                    except Exception as e:
+                        logger.warning('[오류] %s — DCA 매수 실패: %s', ticker, str(e))
+    except Exception as e:
+        logger.debug('[Balanced+] %s — %s', ticker, str(e))
 
     # BTC 거시 필터·경주마 예외는 strategy.generate_comprehensive_signal_with_logging 내부에서 처리됨
 
@@ -3358,42 +4331,93 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker)
             logger.info('✅ %s 매수 신호 실행: 가격 %.0f, 비중 %.2f%%', ticker, current_price, size_pct * 100)
             alloc = ACCOUNT_VALUE * size_pct if current_price else 0
-            ai_logger.info('[EXECUTE] %s | ACTION:BUY | Amt:%.0fKRW | ADX_Score:%.1f', ticker, alloc, adx)
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(
+                    event_type='EXECUTE', ticker=ticker, signal='buy',
+                    price=current_price, avg_buy_price=avg_buy_price,
+                    regime=regime, timeframe=DEFAULT_INTERVAL,
+                    adx=adx, atr=atr, vol_ratio=vol_ratio,
+                    position_size=alloc, size_pct=size_pct,
+                    decision_reason=reason, roi=current_roi,
+                    api_status='ok',
+                )
+            except Exception:
+                pass
             return 'executed', None, None
         except Exception as e:
             logger.warning('[오류] %s — 매수 주문 실행 실패: %s', ticker, str(e))
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(event_type='ERROR', ticker=ticker, signal='buy',
+                             price=current_price, decision_reason=str(e)[:200],
+                             api_status='error', timeframe=DEFAULT_INTERVAL)
+            except Exception:
+                pass
             return 'error', str(e), None
 
     if signal == 'sell':
         position_qty_sell = executor.get_position_qty(ticker)
         if position_qty_sell <= 0:
             logger.debug('[매도 스킵] %s — 보유 잔고 없음', ticker)
-            ai_logger.info('[SKIP] %s | REASON:매도스킵(보유잔고없음)', ticker)
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(event_type='SKIP', ticker=ticker, signal='sell',
+                             price=current_price, decision_reason='보유잔고없음',
+                             timeframe=DEFAULT_INTERVAL)
+            except Exception:
+                pass
             return 'hold', '보유 잔고 없음 (매도 스킵)', None
         position_value = (current_price or 0) * position_qty_sell
         if position_value < MIN_ORDER_KRW:
             logger.debug('[매도 스킵] %s — 보유 금액 %.0f원 < 최소 주문 %s원', ticker, position_value, MIN_ORDER_KRW)
-            ai_logger.info('[SKIP] %s | REASON:매도스킵(최소주문미만) | HoldValue:%.0fKRW', ticker, position_value)
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(event_type='SKIP', ticker=ticker, signal='sell',
+                             price=current_price, decision_reason=f'최소주문미만(보유{position_value:.0f}원)',
+                             timeframe=DEFAULT_INTERVAL)
+            except Exception:
+                pass
             return 'hold', '보유 잔고 없음 (매도 스킵)', None
         sell_size_pct = result.get('sell_size_pct', 1.0)
         next_scale_out_stage = result.get('next_scale_out_stage')
         try:
             executor.place_order('sell', current_price, size_pct=sell_size_pct, ticker=ticker)
             logger.info('✅ %s 매도 신호 실행: 가격 %.0f, 비중 %.0f%%', ticker, current_price, sell_size_pct * 100)
-            ai_logger.info('[EXECUTE] %s | ACTION:SELL | Qty:%s | Reason:신호발생', ticker, position_qty_sell)
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(
+                    event_type='EXECUTE', ticker=ticker, signal='sell',
+                    price=current_price, avg_buy_price=avg_buy_price,
+                    regime=regime, timeframe=DEFAULT_INTERVAL,
+                    adx=adx, atr=atr, vol_ratio=vol_ratio,
+                    size_pct=sell_size_pct,
+                    decision_reason=reason, roi=current_roi,
+                    api_status='ok',
+                    extra={'scale_out_stage': next_scale_out_stage, 'qty': position_qty_sell},
+                )
+            except Exception:
+                pass
+            try:
+                from trading_bot.balanced_plus import log_execution_event, TAG_EXEC_SELL
+                log_execution_event(ticker, 'sell', TAG_EXEC_SELL, current_price)
+            except Exception:
+                pass
             if next_scale_out_stage is not None:
                 set_scale_out_stage(ticker, next_scale_out_stage, avg_buy_price or 0.0)
             if sell_size_pct >= 1.0:
                 get_scale_out_state(ticker, 0.0, 0.0)
-            try:
-                from trading_bot.monitor import send_telegram
-                send_telegram(f'🔴 매도 체결: {ticker} @ {current_price:,.0f}원')
-            except Exception:
-                pass
+            _notify(f'🔴 매도 체결: {ticker} @ {current_price:,.0f}원', level='TRADE')
             return 'executed', None, None
         except Exception as e:
             logger.warning('[오류] %s — 매도 주문 실행 실패: %s', ticker, str(e))
-            ai_logger.info('[ERROR] %s | ACTION:SELL | Msg:%s', ticker, str(e)[:100])
+            try:
+                from trading_bot.ai_logger import log_ai_event
+                log_ai_event(event_type='ERROR', ticker=ticker, signal='sell',
+                             price=current_price, decision_reason=str(e)[:200],
+                             api_status='error', timeframe=DEFAULT_INTERVAL)
+            except Exception:
+                pass
             return 'error', str(e), None
 
     return 'hold', reason, None
@@ -3420,7 +4444,6 @@ def run_cycle(mode):
     # Live 시 잔고 1회 조회 후 캐시 사용 → 티커별 get_position_qty 시 API 추가 호출 없음
     executor.refresh_balance_cache()
     try:
-        from trading_bot.monitor import send_telegram
         cash = executor.get_available_cash()
         msg = (
             f'📊 트레이딩 사이클 시작 [{cycle_id}]\n'
@@ -3430,7 +4453,7 @@ def run_cycle(mode):
             f'실행기: {type(executor).__name__}\n'
             f'가용 현금: {cash:,.0f}원'
         )
-        send_telegram(msg)
+        _notify(msg, level='SUMMARY')  # [IMPROVED]
     except Exception as e:
         logger.debug('텔레그램(사이클 시작) 발송 생략: %s', e)
 
@@ -3440,17 +4463,32 @@ def run_cycle(mode):
     pending_buys = []  # Pass 1에서 수집한 매수 후보 (Pass 2에서 ADX 순 정렬 후 실행)
     cycle_error = None
 
+    # ----- Pass 0: 보유 포지션 하드 스탑로스 체크 (신호 분석 전 최우선 실행) -----
+    if hasattr(executor, 'check_hard_stop_loss'):
+        try:
+            import pyupbit
+            for t in tickers:
+                qty = executor.get_position_qty(t)
+                if qty and qty > 0:
+                    cur_p = pyupbit.get_current_price(t)
+                    if cur_p:
+                        triggered = executor.check_hard_stop_loss(t, cur_p)
+                        if triggered:
+                            logger.info('[HARD STOP-LOSS] %s 트리거 — 전량 매도 실행됨', t)
+                            ai_logger.info('[EXECUTE] %s | ACTION:SELL | REASON:HARD_STOP_LOSS', t)
+                            stats['executed'] = stats.get('executed', 0) + 1
+            executor.refresh_balance_cache()  # 스탑로스 후 잔고 갱신
+        except Exception as e:
+            logger.warning('[HARD STOP-LOSS] 체크 중 오류 (계속 진행): %s', e)
+
     # ----- BTC 거시 장세 필터: 1회 조회 후 이번 사이클 매수 허용 여부 결정 -----
     is_global_bull_market = check_btc_global_trend(interval='day', count=50)
     if not is_global_bull_market:
         logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
-        try:
-            from trading_bot.monitor import send_telegram
-            send_telegram(
-                '🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.'
-            )
-        except Exception as e:
-            logger.debug('텔레그램(BTC 필터) 발송 생략: %s', e)
+        _notify(
+            '🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.',
+            level='CRITICAL',
+        )  # [IMPROVED]
 
     # ----- Pass 1: 분석 및 매도 즉시 실행, 매수는 pending_buys에만 수집 -----
     try:
@@ -3478,20 +4516,32 @@ def run_cycle(mode):
         logger.exception('⚠️ 사이클 루프 중 예외 발생 (종료 로그는 아래에 출력): %s', str(e))
 
     # ----- Pass 2: 매수 우선순위(ADX 내림차순) 정렬 후 Regime 기반 동적 포지션 사이징으로 순차 매수 -----
-    # BTC 하락장이면 신규 매수 생략(매도만 수행).
-    if not cycle_error and pending_buys and is_global_bull_market:
+    # Bear market에서도 strategy가 필터링한 예외(ADX>=40, Volume 1.5x 등 Racehorse)는 pending_buys에 포함되므로 Pass 2 실행.
+    if not cycle_error and pending_buys:
         executor.refresh_balance_cache()
         remaining_cash = executor.get_available_cash()
         total_equity = compute_total_account_equity(executor, tickers)
+        try:
+            from trading_bot.balanced_plus import (
+                MAX_BUYS_PER_CYCLE, MAX_OPEN_POSITIONS,
+                is_in_buy_cooldown, count_open_positions, log_execution_event, TAG_EXEC_BUY,
+            )
+        except Exception:
+            MAX_BUYS_PER_CYCLE = 2
+            MAX_OPEN_POSITIONS = 6
+            def is_in_buy_cooldown(_t): return False
+            def count_open_positions(ex, tk): return sum(1 for t in tk if (ex.get_position_qty(t) or 0) > 0)
+            def log_execution_event(*a, **k): pass
+            TAG_EXEC_BUY = 'EXEC_BUY'
+        buys_executed_this_cycle = 0
 
         # 정렬: ADX가 높을수록 추세가 강하므로 우선 매수 (내림차순)
         pending_buys_sorted = sorted(pending_buys, key=lambda x: float(x.get('adx', 0) or 0), reverse=True)
         try:
-            from trading_bot.monitor import send_telegram
             tickers_str = ', '.join(item['ticker'] for item in pending_buys_sorted[:10])
             if len(pending_buys_sorted) > 10:
                 tickers_str += f' 외 {len(pending_buys_sorted) - 10}건'
-            send_telegram(f'🔔 매수 신호 발생: {len(pending_buys_sorted)}건 — {tickers_str}')
+            _notify(f'🔔 매수 신호 발생: {len(pending_buys_sorted)}건 — {tickers_str}', level='SUMMARY')  # [IMPROVED]
         except Exception as e:
             logger.debug('텔레그램(매수 신호) 발송 생략: %s', e)
 
@@ -3504,11 +4554,30 @@ def run_cycle(mode):
 
         # 가용 현금 및 Regime 기반 동적 포지션 사이징: 소액 시드도 5,000원 이상이면 실행.
         for item in pending_buys_sorted:
+            if buys_executed_this_cycle >= MAX_BUYS_PER_CYCLE:
+                logger.info('[Pass2] MAX_BUYS_PER_CYCLE(%s) 도달로 매수 중단', MAX_BUYS_PER_CYCLE)
+                ai_logger.info('[SKIP] MAX_BUYS_PER_CYCLE reached (%s)', MAX_BUYS_PER_CYCLE)
+                break
+            if count_open_positions(executor, tickers) >= MAX_OPEN_POSITIONS:
+                logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달로 매수 중단', MAX_OPEN_POSITIONS)
+                ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached (%s)', MAX_OPEN_POSITIONS)
+                break
+            # [IMPROVED] 연속 손실 4회+ 시 포지션 크기 0 → 매수 스킵
+            position_size = float(item.get('position_size', 0) or 0)
+            if position_size <= 0:
+                ticker = item.get('ticker', '')
+                logger.info('[매수 스킵] %s — 연속 손실 쿨다운 (position_size=0)', ticker)
+                ai_logger.info('[SKIP] %s | REASON:연속손실쿨다운', ticker)
+                continue
             ticker = item['ticker']
             price = item.get('price')
             size_pct = item.get('size_pct', 0.02)
             atr = item.get('atr', 0.0)
             if price is None:
+                continue
+            if is_in_buy_cooldown(ticker):
+                logger.info('[매수 스킵] %s — BUY_COOLDOWN (Balanced+)', ticker)
+                ai_logger.info('[SKIP] %s | REASON:SKIP_BUY_COOLDOWN', ticker)
                 continue
 
             # Regime-Dependent Dynamic Position Sizing
@@ -3526,9 +4595,9 @@ def run_cycle(mode):
             alloc = min(final_buy_krw, remaining_cash)
             # 업비트 최소 주문 금액(5,000원) 미만이면 스킵
             if alloc < MIN_ORDER_KRW:
-                if base_size < MIN_ORDER_KRW:
-                    logger.info('[매수 스킵] %s — 최소 주문 금액(%s원) 미달로 매수 스킵 (예상비용 %.0f원)', ticker, MIN_ORDER_KRW, base_size)
-                    ai_logger.info('[SKIP] %s | REASON:최소주문미달 | Amt:%.0fKRW', ticker, base_size)
+                if final_buy_krw < MIN_ORDER_KRW:
+                    logger.info('[매수 스킵] %s — 최소 주문 금액(%s원) 미달로 매수 스킵 (예상비용 %.0f원)', ticker, MIN_ORDER_KRW, final_buy_krw)
+                    ai_logger.info('[SKIP] %s | REASON:최소주문미달 | Amt:%.0fKRW', ticker, final_buy_krw)
                 else:
                     logger.info('[매수 스킵] %s — 가용 현금 부족으로 매수 스킵 (가용 %.0f원 < 5,000원)', ticker, remaining_cash)
                     ai_logger.info('[SKIP] %s | REASON:현금부족 | Cash:%.0fKRW', ticker, remaining_cash)
@@ -3543,18 +4612,10 @@ def run_cycle(mode):
                 ai_logger.info('[SKIP] %s | REASON:중복매수방지(이미보유) | HoldValue:%.0fKRW', ticker, hold_value)
                 continue
             # alloc 금액만큼 매수하기 위해 비율 계산 (executor는 size_pct로 잔고 대비 비율 사용)
-            effective_pct = alloc / remaining_cash if remaining_cash > 0 else 0
+            if remaining_cash <= 0:
+                continue
+            effective_pct = alloc / remaining_cash
             try:
-                # Dynamic Sizing 로그 (AI 디버그)
-                ai_logger.info(
-                    "[Dynamic Sizing] %s | RegimeRisk: %.1f%% | ATR: %.2f | SL_Dist: %.2f | CalcKRW: %.0f | size_pct: %.2f",
-                    ticker,
-                    risk_pct * 100,
-                    float(atr or 0.0),
-                    sl_distance,
-                    final_buy_krw,
-                    float(size_pct or 0.0),
-                )
                 executor.place_order('buy', price, size_pct=effective_pct, ticker=ticker)
                 logger.info(
                     '✅ %s 매수 실행 (ADX=%.1f): 가격 %.0f, 동적 배분 %.0f원 (RegimeRisk: %.1f%%, size_pct: %.2f)',
@@ -3565,17 +4626,42 @@ def run_cycle(mode):
                     risk_pct * 100,
                     float(size_pct or 0.0),
                 )
-                ai_logger.info('[EXECUTE] %s | ACTION:BUY | Amt:%.0fKRW | ADX_Score:%.1f', ticker, alloc, float(item.get('adx', 0) or 0))
-                stats['executed'] = stats.get('executed', 0) + 1
-                remaining_cash -= alloc
                 try:
-                    from trading_bot.monitor import send_telegram
-                    send_telegram(f'🟢 매수 체결: {ticker} @ {price:,.0f}원 (비중 {size_pct*100:.1f}%)')
+                    from trading_bot.ai_logger import log_ai_event
+                    log_ai_event(
+                        event_type='EXECUTE', ticker=ticker, signal='buy',
+                        price=price, regime=None, timeframe=DEFAULT_INTERVAL,
+                        adx=float(item.get('adx', 0) or 0),
+                        atr=float(atr or 0),
+                        position_size=alloc, size_pct=float(size_pct or 0),
+                        decision_reason=f'Pass2 ADX순 매수',
+                        api_status='ok',
+                        extra={
+                            'risk_pct': risk_pct, 'sl_distance': sl_distance,
+                            'final_buy_krw': final_buy_krw,
+                            'is_global_bull_market': is_global_bull_market,
+                        },
+                    )
                 except Exception:
                     pass
+                stats['executed'] = stats.get('executed', 0) + 1
+                buys_executed_this_cycle += 1
+                try:
+                    log_execution_event(ticker, 'buy', TAG_EXEC_BUY, price)
+                except Exception:
+                    pass
+                executor.refresh_balance_cache()
+                remaining_cash = executor.get_available_cash()
+                _notify(f'🟢 매수 체결: {ticker} @ {price:,.0f}원 (비중 {size_pct*100:.1f}%)', level='TRADE')
             except Exception as e:
                 logger.warning('[오류] %s — 매수 주문 실행 실패: %s', ticker, str(e))
-                ai_logger.info('[ERROR] %s | ACTION:BUY | Msg:%s', ticker, str(e)[:100])
+                try:
+                    from trading_bot.ai_logger import log_ai_event
+                    log_ai_event(event_type='ERROR', ticker=ticker, signal='buy',
+                                 price=price, decision_reason=str(e)[:200],
+                                 api_status='error', timeframe=DEFAULT_INTERVAL)
+                except Exception:
+                    pass
                 stats['error'] = stats.get('error', 0) + 1
 
     elapsed = (datetime.now() - start).total_seconds()
@@ -3619,6 +4705,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 ### 파일명: trading_bot/tasks/auto_tuner.py ###
@@ -3753,6 +4840,7 @@ if __name__ == '__main__':
     main()
 
 
+
 ### 파일명: trading_bot/tasks/db_maintenance.py ###
 
 #!/usr/bin/env python3
@@ -3849,6 +4937,7 @@ if __name__ == '__main__':
     main()
 
 
+
 ### 파일명: trading_bot/tasks/market_briefing.py ###
 
 #!/usr/bin/env python3
@@ -3884,6 +4973,7 @@ if __name__ == "__main__":
     main()
 
 
+
 ### 파일명: trading_bot/tasks/progress.py ###
 
 import json
@@ -3916,15 +5006,35 @@ def read_progress():
         return {'ts': time.time(), 'phase': 'idle', 'task': None, 'percent': 0, 'msg': None}
 
 
+
 ### 파일명: trading_bot/tasks/scheduler_service.py ###
 
 #!/usr/bin/env python3
+"""
+스케줄러 서비스 — trading bot 주기 실행 관리.
+
+개선 사항:
+  - 캔들 마감 동기화: cron HH:MM (CANDLE_SYNC_OFFSET_SEC 초 후) 실행
+    -> 1h봉 종가 확정 후 분석 보장 (기본 HH:01:00)
+  - PID 파일 락: auto_trader.pid 로 중복 실행 방지 + 스케줄러 재시작 후 stale 락 복구
+  - bot_control.json 체크: /pause 명령 시 해당 사이클 건너뜀
+  - heartbeat: 5분마다 logs/scheduler_heartbeat.json 기록
+  - graceful shutdown: SIGTERM/SIGINT -> 진행 중 trading 종료 대기 후 정리
+"""
 import os
 import sys
 import pathlib
-# ensure workspace root is on path
+import logging
+import json
+import signal
+import time
+import threading
+from datetime import datetime
+
+# workspace root
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-# 라이브 모드 등 env를 위해 .env 로드 (있으면 적용)
+sys.path.insert(0, str(ROOT))
+
 try:
     from dotenv import load_dotenv
     load_dotenv(ROOT / 'trading_bot' / '.env')
@@ -3932,27 +5042,288 @@ except Exception:
     pass
 
 from apscheduler.schedulers.background import BackgroundScheduler
-import time
 import subprocess
 
+# ---------------------------------------------------------------------------
+# 로거 설정
+# ---------------------------------------------------------------------------
+LOG_DIR = ROOT / 'trading_bot' / 'logs'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+SCHED_LOG_FILE = LOG_DIR / 'scheduler_out.log'
+_sched_logger = logging.getLogger('scheduler')
+_sched_logger.setLevel(logging.INFO)
+if not _sched_logger.handlers:
+    _fh = logging.FileHandler(SCHED_LOG_FILE, encoding='utf-8')
+    _fh.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+    ))
+    _sched_logger.addHandler(_fh)
+    _sched_logger.propagate = False
+
+
+def _log(msg: str, level: str = 'info') -> None:
+    getattr(_sched_logger, level)(msg)
+    print(msg)
+
+
+# ---------------------------------------------------------------------------
+# 경로 / 파일 상수
+# ---------------------------------------------------------------------------
 PYTHON = str(ROOT / '.venv' / 'bin' / 'python')
 AUTO_SUMMARY_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'auto_summary.py')]
 DB_MAINTENANCE_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'db_maintenance.py')]
 AUTO_TUNER_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'auto_tuner.py')]
 TELEGRAM_BOT_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'telegram_bot.py')]
 MARKET_BRIEFING_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'market_briefing.py')]
-
-# 모드는 run_trading_cycle() 호출 시점에 매번 읽음 (env 변경/ .env 반영)
 AUTO_TRADER_SCRIPT = str(ROOT / 'trading_bot' / 'tasks' / 'auto_trader.py')
 
-sched = BackgroundScheduler()
+PID_FILE = LOG_DIR / 'auto_trader.pid'
+BOT_CONTROL_FILE = LOG_DIR / 'bot_control.json'
+HEARTBEAT_FILE = LOG_DIR / 'scheduler_heartbeat.json'
 
-# Telegram Chatbot: .env의 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID 사용
+
+# ---------------------------------------------------------------------------
+# 서브프로세스 유틸
+# ---------------------------------------------------------------------------
+
+def _run_subprocess(cmd, name: str, timeout_seconds: int = 300, cwd=None, env=None) -> int:
+    """서브프로세스 실행 + 종료 코드/타임아웃 로깅. 실패 시 텔레그램 알림."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd or str(ROOT),
+            env=env or {**os.environ},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            _log(f'[{name}] 타임아웃 ({timeout_seconds}초) 초과로 강제 종료', 'error')
+            _notify_scheduler(f'[{name}] 실행 타임아웃 ({timeout_seconds}초)')
+            return proc.returncode
+        if proc.returncode != 0:
+            err_text = (stderr or b'').decode('utf-8', errors='ignore')[-500:]
+            _log(f'[{name}] 비정상 종료 (exit={proc.returncode}): {err_text}', 'error')
+            _notify_scheduler(f'[{name}] 비정상 종료 (exit={proc.returncode})')
+        else:
+            _log(f'[{name}] 정상 완료 (exit=0)')
+        return proc.returncode
+    except Exception as e:
+        _log(f'[{name}] 실행 실패: {e}', 'error')
+        _notify_scheduler(f'[{name}] 실행 실패: {e}')
+        return -1
+
+
+def _notify_scheduler(msg: str) -> None:
+    """스케줄러 레벨 알림. 텔레그램 전송 실패해도 무시."""
+    try:
+        from trading_bot.monitor import send_telegram
+        send_telegram(msg)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# PID 파일 기반 락 (중복 실행 방지 + 재시작 복구)
+# ---------------------------------------------------------------------------
+
+def _is_pid_alive(pid: int) -> bool:
+    """프로세스가 살아있는지 확인 (kill -0 방식)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+    except Exception:
+        return False
+
+
+def _read_pid() -> int:
+    """PID 파일에서 PID 읽기. 없거나 오류 시 -1 반환."""
+    try:
+        if PID_FILE.exists():
+            return int(PID_FILE.read_text(encoding='utf-8').strip())
+    except Exception:
+        pass
+    return -1
+
+
+def _write_pid(pid: int) -> None:
+    try:
+        PID_FILE.write_text(str(pid), encoding='utf-8')
+    except Exception as e:
+        _log(f'[PID] PID 파일 쓰기 실패: {e}', 'warning')
+
+
+def _clear_pid() -> None:
+    try:
+        if PID_FILE.exists():
+            PID_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _recover_stale_pid() -> None:
+    """스케줄러 기동 시: stale PID 파일 감지 및 정리."""
+    pid = _read_pid()
+    if pid <= 0:
+        return
+    if _is_pid_alive(pid):
+        _log(f'[복구] auto_trader 프로세스(PID={pid}) 실행 중 감지 — 종료 대기 중...', 'warning')
+        # 최대 30초 대기
+        for _ in range(30):
+            time.sleep(1)
+            if not _is_pid_alive(pid):
+                break
+        if _is_pid_alive(pid):
+            _log(f'[복구] PID={pid} SIGTERM 전송', 'warning')
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+        _notify_scheduler(f'[복구] 이전 auto_trader(PID={pid}) 잔류 -> 재시작으로 정리됨')
+    else:
+        _log(f'[복구] stale PID 파일(PID={pid}) 감지 -> 정리함')
+    _clear_pid()
+
+
+# ---------------------------------------------------------------------------
+# bot_control.json — pause/resume 체크
+# ---------------------------------------------------------------------------
+
+def _is_paused() -> bool:
+    """bot_control.json의 paused 플래그 확인."""
+    try:
+        if BOT_CONTROL_FILE.exists():
+            with open(BOT_CONTROL_FILE, 'r', encoding='utf-8') as f:
+                ctrl = json.load(f)
+            return bool(ctrl.get('paused', False))
+    except Exception:
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+
+def _write_heartbeat() -> None:
+    """스케줄러 생존 신호 기록 (5분마다)."""
+    try:
+        with open(HEARTBEAT_FILE, 'w', encoding='utf-8') as f:
+            json.dump({
+                'ts': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'pid': os.getpid(),
+            }, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 매매 사이클
+# ---------------------------------------------------------------------------
+
+_trading_proc = None  # 현재 실행 중인 auto_trader 서브프로세스
+
+
+def run_trading_cycle() -> None:
+    global _trading_proc
+
+    # 1) pause 체크
+    if _is_paused():
+        _log('[스케줄러] 일시 정지 중 — 사이클 건너뜀')
+        return
+
+    # 2) PID 파일 락 — 이전 사이클이 아직 살아있으면 건너뜀
+    pid = _read_pid()
+    if pid > 0 and _is_pid_alive(pid):
+        _log(f'[스케줄러] auto_trader.py 이전 사이클 아직 실행 중(PID={pid}) — 건너뜀')
+        return
+
+    # 3) stale PID — 이전 사이클 비정상 종료 감지
+    if pid > 0 and not _is_pid_alive(pid):
+        _log(f'[스케줄러] stale PID({pid}) 감지 — 이전 사이클 비정상 종료 추정', 'warning')
+        _notify_scheduler(f'auto_trader 이전 사이클 비정상 종료 감지(PID={pid})')
+        _clear_pid()
+
+    # 4) Popen 메모리 내 이중 체크
+    if _trading_proc is not None and _trading_proc.poll() is None:
+        _log('[스케줄러] auto_trader.py Popen 프로세스 실행 중 — 건너뜀')
+        return
+
+    mode = os.environ.get('TRADING_MODE', 'paper')
+    cmd = [PYTHON, AUTO_TRADER_SCRIPT, '--once', '--mode', mode]
+    _log('')
+    _log('=' * 60)
+    _log('[스케줄러] auto_trader.py 실행 시작: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    _log(f'[스케줄러] 모드: {mode}')
+    _log('=' * 60)
+
+    try:
+        _trading_proc = subprocess.Popen(cmd, cwd=str(ROOT), env={**os.environ})
+        _write_pid(_trading_proc.pid)
+        _log(f'[스케줄러] PID={_trading_proc.pid} 기록')
+
+        # 비동기 감시 스레드: 완료 시 PID 파일 정리 + 비정상 종료 알림
+        def _wait_and_clear(proc):
+            try:
+                proc.wait()
+                rc = proc.returncode
+                if rc is not None and rc != 0:
+                    _log(f'[스케줄러] auto_trader 비정상 종료 (exit={rc})', 'warning')
+                    _notify_scheduler(f'auto_trader 비정상 종료 (exit={rc})')
+            except Exception:
+                pass
+            finally:
+                _clear_pid()
+
+        threading.Thread(target=_wait_and_clear, args=(_trading_proc,), daemon=True).start()
+
+    except Exception as e:
+        _log(f'auto_trader 실행 실패: {e}', 'warning')
+        _notify_scheduler(f'auto_trader 실행 실패: {e}')
+        _clear_pid()
+        _trading_proc = None
+
+
+# ---------------------------------------------------------------------------
+# 서브태스크
+# ---------------------------------------------------------------------------
+
+def run_db_maintenance() -> None:
+    """DB 하우스키핑(Pruning): 오래된 데이터 삭제. 매일 1회 실행."""
+    _log('[스케줄러] db_maintenance 실행')
+    _run_subprocess(DB_MAINTENANCE_CMD, 'db_maintenance', timeout_seconds=600)
+
+
+def run_auto_tuner() -> None:
+    """Walk-Forward 파라미터 튜닝: KRW-BTC/SOL 30일 1h 그리드 서치."""
+    _log('[스케줄러] auto_tuner 실행')
+    _run_subprocess(AUTO_TUNER_CMD, 'auto_tuner', timeout_seconds=1800)
+
+
+def run_market_briefing() -> None:
+    """Periodic Market Briefing: BTC 추세, 계좌·ROI, 24h P&L, ADX 상위 3 -> Telegram."""
+    _log('[스케줄러] market_briefing 실행')
+    _run_subprocess(MARKET_BRIEFING_CMD, 'market_briefing', timeout_seconds=120)
+
+
+# ---------------------------------------------------------------------------
+# Telegram Bot 프로세스
+# ---------------------------------------------------------------------------
+
 _telegram_bot_proc = None
-def start_telegram_bot():
+
+
+def start_telegram_bot() -> None:
     global _telegram_bot_proc
     if not os.environ.get('TELEGRAM_BOT_TOKEN') or not os.environ.get('TELEGRAM_CHAT_ID'):
-        print('ℹ️ Telegram 봇 비활성화 (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 미설정)')
+        _log('Telegram 봇 비활성화 (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 미설정)')
         return
     try:
         _telegram_bot_proc = subprocess.Popen(
@@ -3962,90 +5333,123 @@ def start_telegram_bot():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print('✅ Telegram 봇 기동 (채팅 명령 수신)')
+        _log(f'Telegram 봇 기동 (PID={_telegram_bot_proc.pid})')
     except Exception as e:
-        print('Telegram 봇 기동 실패:', e)
+        _log('Telegram 봇 기동 실패: ' + str(e), 'warning')
 
-# Run auto_summary.py as a separate process each interval to ensure latest code is used
-def run_summary():
+
+# ---------------------------------------------------------------------------
+# Graceful Shutdown
+# ---------------------------------------------------------------------------
+
+def _graceful_shutdown(signum=None, frame=None) -> None:
+    global _trading_proc, _telegram_bot_proc
+    _log('[스케줄러] Graceful shutdown 시작...')
     try:
-        subprocess.Popen(AUTO_SUMMARY_CMD)
-    except Exception as e:
-        print('Failed to start auto_summary subprocess:', e)
+        sched.shutdown(wait=False)
+    except Exception:
+        pass
 
-# Run auto_trader.py for real-time trading cycles (한 번에 하나만 실행되도록 락)
-_trading_lock = None
+    # trading 프로세스 종료 대기 (최대 15초)
+    if _trading_proc is not None and _trading_proc.poll() is None:
+        _log('[스케줄러] 진행 중인 trading 사이클 종료 대기 (15초)...')
+        try:
+            _trading_proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            _log('[스케줄러] trading 프로세스 강제 종료', 'warning')
+            _trading_proc.kill()
+    _clear_pid()
 
-def run_trading_cycle():
-    global _trading_lock
-    try:
-        if _trading_lock is not None and _trading_lock.poll() is None:
-            return
-        # 호출 시점 env에서 모드 읽기 → .env 변경/라이브 전환 시 반영
-        mode = os.environ.get('TRADING_MODE', 'paper')
-        cmd = [PYTHON, AUTO_TRADER_SCRIPT, '--once', '--mode', mode]
-        _trading_lock = subprocess.Popen(cmd)
-    except Exception as e:
-        print('Failed to start auto_trader subprocess:', e)
-        _trading_lock = None
+    if _telegram_bot_proc is not None and _telegram_bot_proc.poll() is None:
+        _telegram_bot_proc.terminate()
 
-# 상태 요약: 5분마다
-# NOTE: auto_summary job disabled per user request to stop periodic 'fetch complete' Telegram messages.
-# sched.add_job(run_summary, 'interval', minutes=5, id='auto_summary')
+    _notify_scheduler('스케줄러가 안전하게 종료되었습니다.')
+    _log('[스케줄러] Graceful shutdown 완료')
 
-# 실시간 매매 사이클: 5분마다 (환경 변수로 제어 가능)
-trading_interval = int(os.environ.get('TRADING_INTERVAL_MINUTES', '5'))
+
+# ---------------------------------------------------------------------------
+# 스케줄러 설정
+# ---------------------------------------------------------------------------
+
+sched = BackgroundScheduler(timezone='Asia/Seoul')
+
+# 캔들 마감 동기화: CANDLE_SYNC_OFFSET_SEC 기반 cron 시간 계산
+# 기본 60초 -> 매시 01분 00초 실행 (1h봉 마감 후 60초 대기)
+_offset_sec = int(os.environ.get('CANDLE_SYNC_OFFSET_SEC', '60'))
+_cron_minute = _offset_sec // 60
+_cron_second = _offset_sec % 60
+
 if os.environ.get('ENABLE_AUTO_TRADING', '0') == '1':
-    sched.add_job(run_trading_cycle, 'interval', minutes=trading_interval, id='auto_trader', max_instances=1)
-    print(f'✅ 자동 매매 활성화 (간격: {trading_interval}분)')
+    sched.add_job(
+        run_trading_cycle,
+        'cron',
+        minute=_cron_minute,
+        second=_cron_second,
+        id='auto_trader',
+        max_instances=1,
+        misfire_grace_time=60,  # 스케줄 지연 시 1분 이내면 재실행 허용
+    )
+    _log(f'자동 매매 활성화 (캔들 동기화: 매시 {_cron_minute:02d}분 {_cron_second:02d}초)')
+    _log(f'   -> 1h봉 마감 {_offset_sec}초 후 실행 (CANDLE_SYNC_OFFSET_SEC={_offset_sec})')
 else:
-    print('ℹ️ 자동 매매 비활성화 (ENABLE_AUTO_TRADING=1로 설정하여 활성화)')
-
-
-def run_db_maintenance():
-    """DB 하우스키핑(Pruning): 오래된 데이터 삭제. 매일 1회 실행."""
-    try:
-        subprocess.Popen(DB_MAINTENANCE_CMD)
-    except Exception as e:
-        print('Failed to start db_maintenance subprocess:', e)
-
-
-def run_auto_tuner():
-    """Walk-Forward 파라미터 튜닝 (V4.0): KRW-BTC/SOL 30일 1h 그리드 서치 후 최적 조합 TuningRun 저장."""
-    try:
-        subprocess.Popen(AUTO_TUNER_CMD)
-    except Exception as e:
-        print('Failed to start auto_tuner subprocess:', e)
-
-
-def run_market_briefing():
-    """Periodic Market Briefing: BTC 추세, 계좌·ROI, 24h P&L, ADX 상위 3 → Telegram 전송."""
-    try:
-        subprocess.Popen(MARKET_BRIEFING_CMD, cwd=str(ROOT), env={**os.environ})
-    except Exception as e:
-        print('Failed to start market_briefing subprocess:', e)
-
+    _log('자동 매매 비활성화 (ENABLE_AUTO_TRADING=1로 설정하여 활성화)')
 
 # DB 하우스키핑: 매일 새벽 3시 (용량·조회 속도 유지)
 sched.add_job(run_db_maintenance, 'cron', hour=3, minute=0, id='db_maintenance')
-print('✅ DB 하우스키핑 스케줄 등록 (매일 03:00)')
+_log('DB 하우스키핑 스케줄 등록 (매일 03:00)')
 
 # Walk-Forward 튜닝: 매주 일요일 04:00
 sched.add_job(run_auto_tuner, 'cron', hour=4, minute=0, day_of_week='sun', id='auto_tuner')
-print('✅ Walk-Forward 튜너 스케줄 등록 (매주 일요일 04:00)')
+_log('Walk-Forward 튜너 스케줄 등록 (매주 일요일 04:00)')
 
 # Market Briefing: 09:00 (업비트 일일 리셋) + 4시간마다 (00, 04, 08, 12, 16, 20)
-sched.add_job(run_market_briefing, 'cron', hour='0,4,8,9,12,16,20', minute=0, id='market_briefing')
-print('✅ Market Briefing 스케줄 등록 (09:00 + 4시간마다)')
+sched.add_job(
+    run_market_briefing, 'cron',
+    hour='0,4,8,9,12,16,20', minute=0,
+    id='market_briefing',
+)
+_log('Market Briefing 스케줄 등록 (09:00 + 4시간마다)')
+
+# Heartbeat: 5분마다 (외부 모니터링용)
+sched.add_job(_write_heartbeat, 'interval', minutes=5, id='heartbeat')
+_log('Heartbeat 스케줄 등록 (5분마다)')
+
+# NOTE: auto_summary job disabled per user request to stop periodic fetch-complete Telegram messages.
+# sched.add_job(run_summary, 'interval', minutes=5, id='auto_summary')
+
+
+# ---------------------------------------------------------------------------
+# 메인
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGINT, _graceful_shutdown)
+
+    _log('=' * 60)
+    _log('스케줄러 기동: ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    _log(f'PID: {os.getpid()}')
+    _log('=' * 60)
+
+    # 재시작 복구: stale PID 정리
+    _recover_stale_pid()
+
     start_telegram_bot()
     sched.start()
+    _write_heartbeat()
+
+    _notify_scheduler(
+        f'스케줄러 기동\n'
+        f'시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
+        f'매매: {"활성" if os.environ.get("ENABLE_AUTO_TRADING","0")=="1" else "비활성"}\n'
+        f'캔들 오프셋: {_offset_sec}초 후'
+    )
+
     try:
         while True:
             time.sleep(1)
     except (KeyboardInterrupt, SystemExit):
-        sched.shutdown()
+        _graceful_shutdown()
 
 
 ### 파일명: trading_bot/tasks/state_updater.py ###
@@ -4121,29 +5525,42 @@ if __name__ == '__main__':
     print(update_phase('예시 단계', 'in_progress', None, ['작업1 완료'], ['다음 작업'], stages={'B.equity':{'weight':40,'progress':50},'B.metrics':{'weight':60,'progress':20}}))
 
 
+
 ### 파일명: trading_bot/telegram_bot.py ###
 
 #!/usr/bin/env python3
 """
-Interactive Telegram Chatbot for monitoring and controlling the trading bot.
-Uses long polling (requests); compatible with one-way send_telegram() from monitor.py.
-Loads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from .env. Only responds to the configured chat_id.
+Interactive Telegram Chatbot — trading bot 모니터링·제어.
+long polling(requests) 방식. monitor.py의 send_telegram()과 동일 봇 사용 (송수신 독립).
+
+보안:
+  - TELEGRAM_CHAT_ID: 허용 채팅방 (필수)
+  - TELEGRAM_ADMIN_USER_ID: 관리자 user_id (설정 시 해당 사용자만 제어 명령 허용)
+
+명령:
+  /help    — 전체 명령어 목록
+  /status  — 스케줄러 상태·사이클 진행률
+  /balance — KRW·보유 종목·ROI
+  /report  — 오늘 체결 및 실현 P&L
+  /pause   — 매매 사이클 일시 정지 (bot_control.json)
+  /resume  — 매매 사이클 재개
+  /panic   — 자동 매매 즉시 전면 중지 (ENABLE_AUTO_LIVE=0 + paused)
 """
 import os
 import sys
 import json
 import time
+import html
 from pathlib import Path
 from datetime import datetime, timedelta
 
-# workspace root on path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(ROOT / '.env')
+    load_dotenv(ROOT / 'trading_bot' / '.env')
 except Exception:
     pass
 
@@ -4151,79 +5568,169 @@ import requests
 
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+ADMIN_USER_ID = os.environ.get('TELEGRAM_ADMIN_USER_ID', '').strip()
 BASE_URL = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else None
-LOG_DIR = ROOT / 'logs'
+
+LOG_DIR = ROOT / 'trading_bot' / 'logs'
 PROGRESS_FILE = LOG_DIR / 'progress.json'
-ENV_PATH = ROOT / '.env'
+BOT_CONTROL_FILE = LOG_DIR / 'bot_control.json'
+ENV_PATH = ROOT / 'trading_bot' / '.env'
+
+# 제어 명령 (admin 전용)
+_CONTROL_COMMANDS = {'/pause', '/resume', '/panic'}
 
 
-def _send(text: str, chat_id: str = None) -> bool:
+# ---------------------------------------------------------------------------
+# 인증
+# ---------------------------------------------------------------------------
+
+def _is_authorized(chat_id: str, from_user_id: str, command: str) -> bool:
+    """채팅방 + (제어 명령이면) admin user_id 검증."""
+    if CHAT_ID and chat_id != CHAT_ID:
+        return False
+    if command in _CONTROL_COMMANDS and ADMIN_USER_ID:
+        if from_user_id != ADMIN_USER_ID:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 저수준 전송
+# ---------------------------------------------------------------------------
+
+def _send(text: str, chat_id: str = None, parse_mode: str = 'HTML') -> bool:
     chat_id = chat_id or CHAT_ID
     if not TOKEN or not chat_id:
         return False
+    payload = {'chat_id': chat_id, 'text': text}
+    if parse_mode:
+        payload['parse_mode'] = parse_mode
     try:
-        r = requests.post(
-            f"{BASE_URL}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
+        r = requests.post(f"{BASE_URL}/sendMessage", json=payload, timeout=10)
         return r.status_code == 200
     except Exception:
         return False
 
 
-def cmd_start() -> str:
-    return (
-        "🤖 Trading Bot Chatbot\n\n"
-        "명령어:\n"
-        "/start — 이 도움말\n"
-        "/status — 현재 단계·진행률\n"
-        "/balance — KRW·보유 종목·ROI\n"
-        "/panic — 자동 라이브 매매 즉시 중지 (ENABLE_AUTO_LIVE=0)\n"
-        "/report — 오늘 체결·실현 P&L"
-    )
+# ---------------------------------------------------------------------------
+# bot_control.json 헬퍼
+# ---------------------------------------------------------------------------
+
+def _read_control() -> dict:
+    try:
+        if BOT_CONTROL_FILE.exists():
+            with open(BOT_CONTROL_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {'paused': False}
+
+
+def _write_control(data: dict) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(BOT_CONTROL_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# 명령 핸들러
+# ---------------------------------------------------------------------------
+
+def cmd_help() -> str:
+    lines = [
+        '<b>🤖 Trading Bot 명령어</b>',
+        '',
+        '/help   — 이 도움말',
+        '/status — 스케줄러 상태 및 사이클 진행률',
+        '/balance — KRW·보유 종목·개별 ROI',
+        '/report — 오늘 체결 및 실현 P&L',
+        '',
+        '<b>⚙️ 제어 명령 (관리자 전용)</b>',
+        '/pause  — 다음 사이클부터 매매 일시 정지',
+        '/resume — 매매 재개',
+        '/panic  — 자동 매매 즉시 전면 중지',
+    ]
+    if ADMIN_USER_ID:
+        lines.append('')
+        lines.append(f'<i>관리자 인증 활성화 (user_id: {html.escape(ADMIN_USER_ID)})</i>')
+    return '\n'.join(lines)
 
 
 def cmd_status() -> str:
-    if not PROGRESS_FILE.exists():
-        return "진행 정보 없음 (progress.json 없음)"
-    try:
-        with open(PROGRESS_FILE) as f:
-            data = json.load(f)
-        phase = data.get("phase", "idle")
-        task = data.get("task") or "-"
-        percent = data.get("percent", 0)
-        msg = data.get("msg") or ""
-        return f"📊 상태\n단계: {phase}\n작업: {task}\n진행률: {percent}%\n{msg}".strip()
-    except Exception as e:
-        return f"상태 조회 실패: {e}"
+    lines = ['<b>📊 봇 상태</b>', '']
+
+    # 사이클 진행률
+    if PROGRESS_FILE.exists():
+        try:
+            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            phase = html.escape(str(data.get('phase', 'idle')))
+            task = html.escape(str(data.get('task') or '-'))
+            percent = data.get('percent', 0)
+            bar_filled = int(percent / 10)
+            bar = '█' * bar_filled + '░' * (10 - bar_filled)
+            lines.append(f'단계: <b>{phase}</b>')
+            lines.append(f'작업: {task}')
+            lines.append(f'진행: [{bar}] {percent}%')
+            updated = data.get('updated_at', '')
+            if updated:
+                lines.append(f'갱신: <code>{html.escape(updated)}</code>')
+        except Exception as e:
+            lines.append(f'진행 파일 읽기 실패: {html.escape(str(e))}')
+    else:
+        lines.append('진행 정보 없음 (progress.json 없음)')
+
+    # pause 상태
+    ctrl = _read_control()
+    paused = ctrl.get('paused', False)
+    lines.append('')
+    if paused:
+        since = ctrl.get('paused_at', '')
+        lines.append(f'⏸ <b>매매 일시 정지 중</b>' + (f' (<code>{html.escape(since)}</code>부터)' if since else ''))
+    else:
+        lines.append('▶️ 매매 정상 작동 중')
+
+    # heartbeat
+    hb_file = LOG_DIR / 'scheduler_heartbeat.json'
+    if hb_file.exists():
+        try:
+            with open(hb_file, 'r', encoding='utf-8') as f:
+                hb = json.load(f)
+            last_hb = hb.get('ts', '')
+            lines.append(f'💓 Heartbeat: <code>{html.escape(last_hb)}</code>')
+        except Exception:
+            pass
+
+    return '\n'.join(lines)
 
 
 def cmd_balance() -> str:
-    mode = os.environ.get("TRADING_MODE", "paper")
+    mode = os.environ.get('TRADING_MODE', 'paper')
+    lines = [f'<b>💰 잔고 조회</b> (모드: <code>{html.escape(mode)}</code>)', '']
     try:
         from trading_bot.executor import PaperExecutor, LiveExecutor
-        account_value = float(os.environ.get("ACCOUNT_VALUE", "100000"))
-        if mode == "live":
+        account_value = float(os.environ.get('ACCOUNT_VALUE', '1000000'))
+        if mode == 'live':
             ex = LiveExecutor()
-            if not getattr(ex, "enabled", False):
-                return "Live 비활성화. TRADING_MODE=paper 또는 Live 설정 확인."
+            if not getattr(ex, 'enabled', False):
+                return '<b>💰 잔고 조회</b>\n\nLive 비활성화. TRADING_MODE=paper 또는 Live 설정 확인.'
             ex.refresh_balance_cache()
         else:
             ex = PaperExecutor(initial_cash=account_value)
-            # Paper는 positions만 있음; DB/캐시 없음. 포지션은 auto_trader 세션 기준이 아니라 로컬이라 여기선 0일 수 있음.
+
         krw = ex.get_available_cash()
-        lines = [f"💵 KRW: {krw:,.0f}원", f"(모드: {mode})"]
-        # Holdings: Paper는 positions, Live는 _balance_cache
-        if mode == "paper":
-            tickers = list(getattr(ex, "positions", {}).keys())
+        lines.append(f'KRW 가용: <b>{krw:,.0f}원</b>')
+
+        if mode == 'paper':
+            tickers = list(getattr(ex, 'positions', {}).keys())
         else:
-            cache = getattr(ex, "_balance_cache", {}) or {}
-            tickers = [f"KRW-{c}" for c in cache if c != "KRW" and (cache.get(c) or 0) > 0]
+            cache = getattr(ex, '_balance_cache', {}) or {}
+            tickers = [f'KRW-{c}' for c in cache if c != 'KRW' and (cache.get(c) or 0) > 0]
+
         if tickers:
             try:
                 import pyupbit
-                for t in tickers[:20]:
+                for t in tickers[:15]:
                     qty = ex.get_position_qty(t)
                     if qty <= 0:
                         continue
@@ -4233,44 +5740,24 @@ def cmd_balance() -> str:
                     if avg and avg > 0 and cur > 0:
                         roi = (cur - avg) / avg * 100
                         val = qty * cur
-                        lines.append(f"• {t}: {qty:.6f} @ {cur:,.0f} (ROI {roi:+.1f}%, 약 {val:,.0f}원)")
+                        roi_str = f'+{roi:.1f}%' if roi >= 0 else f'{roi:.1f}%'
+                        lines.append(
+                            f'• <code>{html.escape(t)}</code>: {cur:,.0f}원 '
+                            f'({roi_str}, 평가 {val:,.0f}원)'
+                        )
                     else:
-                        lines.append(f"• {t}: {qty:.6f}")
+                        lines.append(f'• <code>{html.escape(t)}</code>: {qty:.6f}')
             except Exception as e:
-                lines.append(f"(보유 조회 오류: {e})")
+                lines.append(f'보유 조회 오류: {html.escape(str(e))}')
         else:
-            lines.append("보유 종목 없음")
-        return "\n".join(lines)
+            lines.append('보유 종목 없음')
     except Exception as e:
-        return f"잔고 조회 실패: {e}"
-
-
-def cmd_panic() -> str:
-    """Same logic as main.py /panic: set ENABLE_AUTO_LIVE=0 in .env."""
-    if not ENV_PATH.exists():
-        return ".env 없음 — 패닉 적용 불가"
-    try:
-        with open(ENV_PATH) as f:
-            lines = f.readlines()
-        new_lines = []
-        found = False
-        for L in lines:
-            if L.strip().startswith("ENABLE_AUTO_LIVE="):
-                new_lines.append("ENABLE_AUTO_LIVE=0\n")
-                found = True
-            else:
-                new_lines.append(L)
-        if not found:
-            new_lines.append("ENABLE_AUTO_LIVE=0\n")
-        with open(ENV_PATH, "w") as f:
-            f.writelines(new_lines)
-        return "🛑 ENABLE_AUTO_LIVE=0 적용됨. 자동 라이브 매매가 중지됩니다."
-    except Exception as e:
-        return f"패닉 적용 실패: {e}"
+        lines.append(f'잔고 조회 실패: {html.escape(str(e))}')
+    return '\n'.join(lines)
 
 
 def cmd_report() -> str:
-    """Today's orders from Order table: count and realized P&L (sell - buy)."""
+    lines = [f'<b>📋 오늘 체결 리포트</b> (<code>{datetime.now().strftime("%Y-%m-%d")}</code>)', '']
     try:
         from trading_bot.db import get_session
         from trading_bot.models import Order
@@ -4279,50 +5766,137 @@ def cmd_report() -> str:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = session.query(Order).filter(Order.ts >= today_start).all()
         session.close()
-        buys = [r for r in rows if (r.side or "").lower() == "buy"]
-        sells = [r for r in rows if (r.side or "").lower() == "sell"]
+        buys = [r for r in rows if (r.side or '').lower() == 'buy']
+        sells = [r for r in rows if (r.side or '').lower() == 'sell']
         buy_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in buys)
         sell_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in sells)
         pnl = sell_sum - buy_sum
+        pnl_str = f'+{pnl:,.0f}원' if pnl >= 0 else f'{pnl:,.0f}원'
+        lines.append(f'매수: <b>{len(buys)}건</b>  {buy_sum:,.0f}원')
+        lines.append(f'매도: <b>{len(sells)}건</b>  {sell_sum:,.0f}원')
+        lines.append(f'실현 P&L: <b>{pnl_str}</b>')
+    except Exception as e:
+        lines.append(f'리포트 조회 실패: {html.escape(str(e))}')
+    return '\n'.join(lines)
+
+
+def cmd_pause(from_user_id: str) -> str:
+    if ADMIN_USER_ID and from_user_id != ADMIN_USER_ID:
+        return '🚫 권한 없음: 관리자만 매매를 일시 정지할 수 있습니다.'
+    try:
+        ctrl = _read_control()
+        if ctrl.get('paused'):
+            return '⏸ 이미 일시 정지 상태입니다. /resume 으로 재개하세요.'
+        ctrl['paused'] = True
+        ctrl['paused_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ctrl['paused_by'] = from_user_id
+        _write_control(ctrl)
         return (
-            f"📋 오늘 체결\n"
-            f"매수: {len(buys)}건, {buy_sum:,.0f}원\n"
-            f"매도: {len(sells)}건, {sell_sum:,.0f}원\n"
-            f"실현 P&L: {pnl:+,.0f}원"
+            '⏸ <b>매매 일시 정지 요청됨</b>\n\n'
+            '다음 사이클부터 매매가 건너뜁니다.\n'
+            '재개하려면 /resume 을 보내세요.'
         )
     except Exception as e:
-        return f"리포트 조회 실패: {e}"
+        return f'일시 정지 실패: {html.escape(str(e))}'
 
+
+def cmd_resume(from_user_id: str) -> str:
+    if ADMIN_USER_ID and from_user_id != ADMIN_USER_ID:
+        return '🚫 권한 없음: 관리자만 매매를 재개할 수 있습니다.'
+    try:
+        ctrl = _read_control()
+        if not ctrl.get('paused'):
+            return '▶️ 이미 정상 작동 중입니다.'
+        ctrl['paused'] = False
+        ctrl['resumed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ctrl['resumed_by'] = from_user_id
+        _write_control(ctrl)
+        return '▶️ <b>매매 재개됨</b>\n\n다음 사이클부터 정상 매매합니다.'
+    except Exception as e:
+        return f'재개 실패: {html.escape(str(e))}'
+
+
+def cmd_panic(from_user_id: str) -> str:
+    if ADMIN_USER_ID and from_user_id != ADMIN_USER_ID:
+        return '🚫 권한 없음: 관리자만 패닉 버튼을 사용할 수 있습니다.'
+    results = []
+
+    # 1) .env ENABLE_AUTO_LIVE=0
+    if ENV_PATH.exists():
+        try:
+            with open(ENV_PATH, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            new_lines = []
+            found = False
+            for L in lines:
+                if L.strip().startswith('ENABLE_AUTO_LIVE='):
+                    new_lines.append('ENABLE_AUTO_LIVE=0\n')
+                    found = True
+                else:
+                    new_lines.append(L)
+            if not found:
+                new_lines.append('ENABLE_AUTO_LIVE=0\n')
+            with open(ENV_PATH, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+            os.environ['ENABLE_AUTO_LIVE'] = '0'
+            results.append('✅ ENABLE_AUTO_LIVE=0 적용')
+        except Exception as e:
+            results.append(f'⚠️ .env 수정 실패: {html.escape(str(e))}')
+    else:
+        results.append('⚠️ .env 파일 없음 — ENABLE_AUTO_LIVE 수정 건너뜀')
+
+    # 2) bot_control.json paused=true
+    try:
+        ctrl = _read_control()
+        ctrl['paused'] = True
+        ctrl['paused_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ctrl['paused_by'] = from_user_id
+        ctrl['panic'] = True
+        _write_control(ctrl)
+        results.append('✅ 매매 사이클 일시 정지 플래그 설정')
+    except Exception as e:
+        results.append(f'⚠️ bot_control 저장 실패: {html.escape(str(e))}')
+
+    status_block = '\n'.join(results)
+    return (
+        f'🛑 <b>패닉 버튼 실행됨</b>\n\n'
+        f'{status_block}\n\n'
+        f'자동 라이브 매매가 중지됩니다.\n'
+        f'재개하려면 .env에서 <code>ENABLE_AUTO_LIVE=1</code>로 변경 후 /resume 을 보내세요.'
+    )
+
+
+# ---------------------------------------------------------------------------
+# 공개 briefing 함수 (market_briefing.py에서 호출)
+# ---------------------------------------------------------------------------
 
 def _btc_global_trend() -> str:
-    """Bull or Bear from KRW-BTC EMA trend (same logic as auto_trader.check_btc_global_trend)."""
     try:
         from trading_bot.tasks.auto_trader import check_btc_global_trend
-        is_bull = check_btc_global_trend(interval="day", count=50)
-        return "🟢 Bull" if is_bull else "🔴 Bear"
+        is_bull = check_btc_global_trend(interval='day', count=50)
+        return '🟢 Bull' if is_bull else '🔴 Bear'
     except Exception:
-        return "—"
+        return '—'
 
 
 def _account_value_and_roi() -> tuple:
-    """Returns (total_value_krw, roi_pct) or (None, None) on error."""
     try:
         from trading_bot.executor import PaperExecutor, LiveExecutor
-        account_value = float(os.environ.get("ACCOUNT_VALUE", "100000"))
-        mode = os.environ.get("TRADING_MODE", "paper")
-        if mode == "live":
+        account_value = float(os.environ.get('ACCOUNT_VALUE', '1000000'))
+        mode = os.environ.get('TRADING_MODE', 'paper')
+        if mode == 'live':
             ex = LiveExecutor()
-            if not getattr(ex, "enabled", False):
+            if not getattr(ex, 'enabled', False):
                 return None, None
             ex.refresh_balance_cache()
         else:
             ex = PaperExecutor(initial_cash=account_value)
         krw = ex.get_available_cash()
-        if mode == "paper":
-            tickers = list(getattr(ex, "positions", {}).keys())
+        if mode == 'paper':
+            tickers = list(getattr(ex, 'positions', {}).keys())
         else:
-            cache = getattr(ex, "_balance_cache", {}) or {}
-            tickers = [f"KRW-{c}" for c in cache if c != "KRW" and (cache.get(c) or 0) > 0]
+            cache = getattr(ex, '_balance_cache', {}) or {}
+            tickers = [f'KRW-{c}' for c in cache if c != 'KRW' and (cache.get(c) or 0) > 0]
         cost_basis = krw
         total_value = krw
         try:
@@ -4338,17 +5912,13 @@ def _account_value_and_roi() -> tuple:
                 total_value += cur * qty
         except Exception:
             pass
-        if cost_basis <= 0:
-            roi = 0.0
-        else:
-            roi = (total_value - cost_basis) / cost_basis * 100
+        roi = (total_value - cost_basis) / cost_basis * 100 if cost_basis > 0 else 0.0
         return total_value, roi
     except Exception:
         return None, None
 
 
 def _pnl_last_24h() -> tuple:
-    """Returns (buy_sum, sell_sum, pnl, trade_count) from Trade table for last 24h."""
     try:
         from trading_bot.db import get_session
         from trading_bot.models import Trade
@@ -4356,8 +5926,8 @@ def _pnl_last_24h() -> tuple:
         cutoff = datetime.utcnow() - timedelta(hours=24)
         rows = session.query(Trade).filter(Trade.ts >= cutoff).all()
         session.close()
-        buys = [r for r in rows if (r.side or "").lower() == "buy"]
-        sells = [r for r in rows if (r.side or "").lower() == "sell"]
+        buys = [r for r in rows if (r.side or '').lower() == 'buy']
+        sells = [r for r in rows if (r.side or '').lower() == 'sell']
         buy_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in buys)
         sell_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in sells)
         return buy_sum, sell_sum, sell_sum - buy_sum, len(rows)
@@ -4366,14 +5936,13 @@ def _pnl_last_24h() -> tuple:
 
 
 def _top3_adx_tickers() -> list:
-    """Top 3 tickers by latest ADX (minute60). Returns list of (ticker, adx)."""
     try:
         from trading_bot.db import get_session
         from trading_bot.models import TechnicalIndicator
         session = get_session()
         rows = (
             session.query(TechnicalIndicator)
-            .filter(TechnicalIndicator.timeframe == "minute60")
+            .filter(TechnicalIndicator.timeframe == 'minute60')
             .order_by(TechnicalIndicator.ts.desc())
             .limit(500)
             .all()
@@ -4384,94 +5953,102 @@ def _top3_adx_tickers() -> list:
             if r.ticker in seen:
                 continue
             ind = r.indicators if isinstance(r.indicators, dict) else {}
-            adx = ind.get("adx")
+            adx = ind.get('adx')
             if adx is not None:
                 try:
                     seen[r.ticker] = float(adx)
                 except (TypeError, ValueError):
                     pass
-        sorted_tickers = sorted(seen.items(), key=lambda x: -x[1])[:3]
-        return sorted_tickers
+        return sorted(seen.items(), key=lambda x: -x[1])[:3]
     except Exception:
         return []
 
 
 def send_briefing(chat_id: str = None) -> bool:
-    """
-    Build and send a periodic market briefing to Telegram.
-    - BTC global trend (Bull/Bear)
-    - Total account value and portfolio ROI
-    - Last 24h P&L from Trade table
-    - Top 3 tickers by ADX (high-priority monitoring)
-    Sends via Bot API (same as _send); no context.bot needed.
-    """
-    lines = ["📰 Market Briefing", ""]
-    # 1) BTC trend
-    trend = _btc_global_trend()
-    lines.append(f"• BTC 추세: {trend}")
-    # 2) Account value & ROI
+    """주기 시장 브리핑 전송 (market_briefing.py 에서 호출)."""
+    lines = ['<b>📰 Market Briefing</b>', f'<code>{datetime.now().strftime("%Y-%m-%d %H:%M")}</code>', '']
+    lines.append(f'• BTC 추세: {_btc_global_trend()}')
     total_val, roi = _account_value_and_roi()
     if total_val is not None:
-        lines.append(f"• 계좌 총액: {total_val:,.0f}원 (ROI {roi:+.1f}%)")
+        roi_str = f'+{roi:.1f}%' if roi >= 0 else f'{roi:.1f}%'
+        lines.append(f'• 계좌 총액: <b>{total_val:,.0f}원</b> (ROI {roi_str})')
     else:
-        lines.append("• 계좌: 조회 불가 (Live 비활성 등)")
-    # 3) Last 24h P&L (Trade table)
+        lines.append('• 계좌: 조회 불가 (Live 비활성 등)')
     buy_24, sell_24, pnl_24, n_24 = _pnl_last_24h()
-    lines.append(f"• 최근 24h 체결: {n_24}건 | 매수 {buy_24:,.0f} / 매도 {sell_24:,.0f} | P&L {pnl_24:+,.0f}원")
-    # 4) Top 3 ADX
+    pnl_str = f'+{pnl_24:,.0f}원' if pnl_24 >= 0 else f'{pnl_24:,.0f}원'
+    lines.append(f'• 최근 24h: {n_24}건 | 매수 {buy_24:,.0f} / 매도 {sell_24:,.0f} | P&L <b>{pnl_str}</b>')
     top3 = _top3_adx_tickers()
     if top3:
-        lines.append("• ADX 상위 3 (모니터링): " + ", ".join(f"{t}({a:.0f})" for t, a in top3))
+        top3_str = ', '.join(f'<code>{html.escape(t)}</code>({a:.0f})' for t, a in top3)
+        lines.append(f'• ADX 상위 3: {top3_str}')
     else:
-        lines.append("• ADX 상위: 데이터 없음")
-    msg = "\n".join(lines)
-    return _send(msg, chat_id=chat_id or CHAT_ID)
+        lines.append('• ADX 상위: 데이터 없음')
+    return _send('\n'.join(lines), chat_id=chat_id or CHAT_ID)
 
 
-def handle_message(text: str) -> str:
+# ---------------------------------------------------------------------------
+# 메시지 라우팅
+# ---------------------------------------------------------------------------
+
+def handle_message(text: str, chat_id: str, from_user_id: str) -> str:
     if not text or not text.strip():
-        return ""
-    text = text.strip()
-    if text == "/start":
-        return cmd_start()
-    if text == "/status":
-        return cmd_status()
-    if text == "/balance":
-        return cmd_balance()
-    if text == "/panic":
-        return cmd_panic()
-    if text == "/report":
-        return cmd_report()
-    if text.startswith("/"):
-        return "알 수 없는 명령. /start 로 도움말 확인."
-    return ""
+        return ''
+    cmd = text.strip().split()[0].lower()
 
+    if not _is_authorized(chat_id, from_user_id, cmd):
+        if CHAT_ID and chat_id != CHAT_ID:
+            return ''  # 다른 채팅방은 조용히 무시
+        return '🚫 권한 없음: 관리자만 이 명령을 사용할 수 있습니다.'
+
+    if cmd in ('/help', '/start'):
+        return cmd_help()
+    if cmd == '/status':
+        return cmd_status()
+    if cmd == '/balance':
+        return cmd_balance()
+    if cmd == '/report':
+        return cmd_report()
+    if cmd == '/pause':
+        return cmd_pause(from_user_id)
+    if cmd == '/resume':
+        return cmd_resume(from_user_id)
+    if cmd == '/panic':
+        return cmd_panic(from_user_id)
+    if cmd.startswith('/'):
+        return '알 수 없는 명령. /help 로 도움말 확인.'
+    return ''
+
+
+# ---------------------------------------------------------------------------
+# Long polling
+# ---------------------------------------------------------------------------
 
 def poll_once(offset: int) -> tuple:
-    """Returns (next_offset, list of (chat_id, text))."""
+    """Returns (next_offset, list of (chat_id, from_user_id, text))."""
     if not TOKEN:
         return offset, []
     try:
         r = requests.get(
             f"{BASE_URL}/getUpdates",
-            params={"offset": offset, "timeout": 30},
+            params={'offset': offset, 'timeout': 30},
             timeout=35,
         )
         if r.status_code != 200:
             return offset, []
         data = r.json()
-        if not data.get("ok"):
+        if not data.get('ok'):
             return offset, []
-        updates = data.get("result") or []
+        updates = data.get('result') or []
         out = []
         next_offset = offset
         for u in updates:
-            next_offset = u.get("update_id", 0) + 1
-            msg = u.get("message") or {}
-            chat_id = str(msg.get("chat", {}).get("id", ""))
-            text = (msg.get("text") or "").strip()
+            next_offset = u.get('update_id', 0) + 1
+            msg = u.get('message') or {}
+            chat_id = str(msg.get('chat', {}).get('id', ''))
+            from_id = str(msg.get('from', {}).get('id', ''))
+            text = (msg.get('text') or '').strip()
             if chat_id and text:
-                out.append((chat_id, text))
+                out.append((chat_id, from_id, text))
         return next_offset, out
     except Exception:
         return offset, []
@@ -4479,29 +6056,28 @@ def poll_once(offset: int) -> tuple:
 
 def main():
     if not TOKEN or not CHAT_ID:
-        print("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 없습니다. .env를 확인하세요.")
+        print('TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 없습니다. trading_bot/.env를 확인하세요.')
         sys.exit(1)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     offset = 0
-    print("Telegram bot polling (chat_id=%s). Ctrl+C to stop." % CHAT_ID)
+    auth_info = f'admin_user_id={ADMIN_USER_ID}' if ADMIN_USER_ID else '인증=CHAT_ID만'
+    print(f'Telegram bot polling (chat_id={CHAT_ID}, {auth_info}). Ctrl+C to stop.')
     while True:
         try:
             offset, updates = poll_once(offset)
-            for chat_id, text in updates:
-                if CHAT_ID and chat_id != CHAT_ID:
-                    continue
-                reply = handle_message(text)
+            for chat_id, from_user_id, text in updates:
+                reply = handle_message(text, chat_id, from_user_id)
                 if reply:
                     _send(reply, chat_id=chat_id)
         except KeyboardInterrupt:
             break
         except Exception as e:
-            print("Poll error:", e)
+            print(f'Poll error: {e}')
             time.sleep(5)
-    print("Telegram bot stopped.")
+    print('Telegram bot stopped.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
 
 
@@ -4555,6 +6131,7 @@ except Exception as e:
 print('Unit tests complete.')
 
 
+
 ### 파일명: trading_bot/tuner.py ###
 
 import itertools
@@ -4602,5 +6179,6 @@ def grid_search(strategy_fn, df, param_grid, backtest_fn, fee_pct=0.0005, slippa
         print('Failed to write tuning runs to DB:', e)
 
     return df_res
+
 
 
