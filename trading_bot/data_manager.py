@@ -184,16 +184,18 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
                     ts = pd.Timestamp(ts).tz_localize(None).to_pydatetime()
             except Exception:
                 pass
-            ema_s = float(row.get('ema_short') or 0)
-            ema_l = float(row.get('ema_long') or 0)
-            rsi = float(row.get('rsi') or 50)
-            atr = float(row.get('atr') or 0)
-            atr_raw = float(row.get('atr_raw') or row.get('atr') or 0)
-            adx = float(row.get('adx') or 0)
-            bb_l = float(row.get('bb_lower') or 0)
-            bb_m = float(row.get('bb_middle') or 0)
-            bb_u = float(row.get('bb_upper') or 0)
-            vol_ma = float(row.get('volume_ma') or 0)
+            # _float_or_none: NaN/Inf → None. 스칼라 컬럼은 or로 fallback, JSON 컬럼은 None 허용.
+            ema_s = _float_or_none(row.get('ema_short')) or 0.0
+            ema_l = _float_or_none(row.get('ema_long')) or 0.0
+            rsi = _float_or_none(row.get('rsi')) or 50.0
+            atr = _float_or_none(row.get('atr')) or 0.0
+            vol_ma = _float_or_none(row.get('volume_ma')) or 0.0
+            # indicators JSON 컬럼: NaN → None(null) → PostgreSQL JSON 허용
+            adx = _float_or_none(row.get('adx')) or 0.0
+            atr_raw = _float_or_none(row.get('atr_raw')) or _float_or_none(row.get('atr'))
+            bb_l = _float_or_none(row.get('bb_lower'))
+            bb_m = _float_or_none(row.get('bb_middle'))
+            bb_u = _float_or_none(row.get('bb_upper'))
             obv = _float_or_none(row.get('obv'))
             obv_sma = _float_or_none(row.get('obv_sma'))
             bb_width = _float_or_none(row.get('bb_width'))

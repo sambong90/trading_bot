@@ -47,6 +47,11 @@ spec:
             # PGDATA: 볼륨 루트가 아닌 하위 디렉터리 사용 (lost+found 충돌 방지)
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
+            # PGTZ: 세션 기본 타임존을 한국시간으로 설정.
+            # TIMESTAMP WITH TIME ZONE은 내부적으로 UTC로 저장되지만,
+            # 클라이언트 조회 시 KST(UTC+9)로 반환됨. 데이터 정확성에는 영향 없음.
+            - name: PGTZ
+              value: Asia/Seoul
 
           ports:
             - name: postgres
