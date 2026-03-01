@@ -95,7 +95,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          dockerfile: Dockerfile
+          file: Dockerfile
 
           # 빌드 대상 플랫폼:
           #   linux/amd64 — GitHub Actions 호스트 (표준 클라우드 노드)
