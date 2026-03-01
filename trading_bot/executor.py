@@ -611,7 +611,7 @@ class LiveExecutor:
             self.ENABLE_AUTO_LIVE = os.environ.get('ENABLE_AUTO_LIVE') == '1'
             self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', self.MAX_DAILY_LOSS_KRW))
             self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', self.MAX_POSITION_PCT))
-            self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS','true').lower() in ('1','true','yes')
+            self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS','false').lower() in ('1','true','yes')
         except Exception:
             pass
 
@@ -633,15 +633,16 @@ class LiveExecutor:
 
 
     def _daily_loss_exceeded(self, additional_spend=0.0):
-        # compute realized P&L for today using trades table (sells add KRW, buys subtract KRW), include fees
+        # compute realized P&L for today using orders table (sells add KRW, buys subtract KRW), include fees
+        # Note: Trade table is for backtest simulations only; actual live/paper orders are in the Order table
         try:
             from datetime import datetime, timedelta
             from trading_bot.db import get_session
-            from trading_bot.models import Trade
+            from trading_bot.models import Order
             session=get_session()
             today = datetime.utcnow().date()
             start_dt = datetime(today.year, today.month, today.day)
-            trades = session.query(Trade).filter(Trade.ts >= start_dt).all()
+            trades = session.query(Order).filter(Order.ts >= start_dt).all()
             pnl = 0.0
             fees = 0.0
             for t in trades:

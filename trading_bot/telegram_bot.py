@@ -232,8 +232,9 @@ def cmd_report() -> str:
         from trading_bot.db import get_session
         from trading_bot.models import Order
         session = get_session()
-        now = datetime.utcnow()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # KST 자정 기준으로 오늘 체결 조회 (헤더 날짜와 일치). Order.ts는 UTC 저장이므로 -9h 변환
+        today_kst = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = today_kst - timedelta(hours=9)  # KST 자정 → UTC
         rows = session.query(Order).filter(Order.ts >= today_start).all()
         session.close()
         buys = [r for r in rows if (r.side or '').lower() == 'buy']
@@ -391,12 +392,11 @@ def _account_value_and_roi() -> tuple:
 def _pnl_last_24h() -> tuple:
     try:
         from trading_bot.db import get_session
-        from trading_bot.models import Trade
+        from trading_bot.models import Order  # 실제 라이브/페이퍼 체결은 Order 테이블 (Trade는 백테스트 전용)
         session = get_session()
         cutoff = datetime.utcnow() - timedelta(hours=24)
-        rows = session.query(Trade).filter(
-            Trade.ts >= cutoff,
-            Trade.backtest_id == None,  # 백테스트 시뮬레이션 제외, 실제 라이브 거래만
+        rows = session.query(Order).filter(
+            Order.ts >= cutoff,
         ).all()
         session.close()
         buys = [r for r in rows if (r.side or '').lower() == 'buy']

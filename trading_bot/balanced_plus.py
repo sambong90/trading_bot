@@ -162,7 +162,15 @@ def is_in_partial_stop_cooldown(ticker: str) -> bool:
     """True if last PS1/PS2 event within PARTIAL_STOP_COOLDOWN_MINUTES."""
     ts1 = _last_ts_with_tag(ticker, TAG_PS1)
     ts2 = _last_ts_with_tag(ticker, TAG_PS2)
-    ts = ts1 or ts2
+    # 가장 최근 이벤트 기준으로 쿨다운 판단 (ts1 or ts2는 ts2가 더 최근이어도 ts1 반환하는 버그)
+    if ts1 is None and ts2 is None:
+        return False
+    if ts1 is None:
+        ts = ts2
+    elif ts2 is None:
+        ts = ts1
+    else:
+        ts = ts1 if ts1 >= ts2 else ts2
     if ts is None:
         return False
     try:
