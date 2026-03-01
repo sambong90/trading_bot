@@ -2,8 +2,8 @@
 # Trading Bot — Dockerfile
 # Base: python:3.11-slim (ARM64 native for M-series Mac / linux/arm64)
 # WORKDIR /app  = workspace root
-#   /app/trading_bot/db/   → SQLite DB (볼륨 마운트 권장)
 #   /app/trading_bot/logs/ → 로그·캐시·pid 파일 (볼륨 마운트 권장)
+#   DB: PostgreSQL (k8s/postgres-statefulset.yaml), DB_URL 환경변수로 연결
 # -----------------------------------------------------------------------
 FROM python:3.11-slim
 
@@ -18,6 +18,7 @@ WORKDIR /app
 # ── 시스템 의존성 ──────────────────────────────────────────────────────
 # gcc: numpy/pandas C 확장 컴파일용
 # libgomp1: ta-lib 일부 variant에서 필요 (OpenMP)
+# psycopg2-binary는 libpq 정적 번들 포함 → 별도 libpq-dev 설치 불필요
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libgomp1 \
     && rm -rf /var/lib/apt/lists/*
@@ -29,6 +30,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ── 애플리케이션 코드 복사 ────────────────────────────────────────────
 COPY trading_bot/ trading_bot/
+COPY scripts/ scripts/
 
 # ── .venv/bin/python 심링크 ───────────────────────────────────────────
 # scheduler_service.py 내부에서 서브프로세스를 .venv/bin/python으로 호출함.
