@@ -122,3 +122,39 @@ jobs:
           echo "| latest | \`ghcr.io/${{ env.IMAGE_NAME }}:latest\` |" >> $GITHUB_STEP_SUMMARY
           echo "| sha | \`ghcr.io/${{ env.IMAGE_NAME }}:$(echo ${{ github.sha }} | cut -c1-7)\` |" >> $GITHUB_STEP_SUMMARY
           echo "| digest | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ── Job 2: K8s 배포 (self-hosted runner) ─────────────────────────────────
+  # 빌드·push 완료 후 self-hosted Mac Mini에서 kubectl rollout restart 실행.
+  # Self-hosted runner는 로컬 K8s 클러스터(OrbStack 등)에 직접 접근 가능.
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build-and-push   # 빌드 성공 후에만 실행
+    runs-on: self-hosted     # sambongaiui-Macmini 러너 사용
+
+    steps:
+      # ── 1. 최신 이미지로 파드 재기동 ──────────────────────────────────────
+      # imagePullPolicy: Always 이므로 restart 시 GHCR에서 최신 이미지 자동 pull.
+      # Recreate 전략: 구 파드 종료 완료 후 신 파드 기동 (SQLite 잠금 방지).
+      - name: Rollout restart
+        run: kubectl rollout restart deployment/trading-bot -n quant-bot
+
+      # ── 2. 배포 완료 대기 (최대 3분) ─────────────────────────────────────
+      # Recreate 전략 특성상 구 파드 Terminating → 신 파드 Running 순으로 진행됨.
+      # 실패 시 워크플로가 에러로 표시되어 알림 가능.
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/trading-bot -n quant-bot --timeout=180s
+
+      # ── 3. 배포 결과 요약 출력 ────────────────────────────────────────────
+      - name: Deployment summary
+        run: |
+          echo "### Kubernetes Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | quant-bot |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | trading-bot |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | ghcr.io/${{ env.IMAGE_NAME }}:latest |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          POD_INFO=$(kubectl get pod -n quant-bot -l app.kubernetes.io/name=trading-bot \
+            --no-headers -o custom-columns='NAME:.metadata.name,STATUS:.status.phase,READY:.status.containerStatuses[0].ready' 2>/dev/null || echo "조회 실패")
+          echo "| Pod 상태 | $POD_INFO |" >> $GITHUB_STEP_SUMMARY
