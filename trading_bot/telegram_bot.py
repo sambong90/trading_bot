@@ -394,7 +394,10 @@ def _pnl_last_24h() -> tuple:
         from trading_bot.models import Trade
         session = get_session()
         cutoff = datetime.utcnow() - timedelta(hours=24)
-        rows = session.query(Trade).filter(Trade.ts >= cutoff).all()
+        rows = session.query(Trade).filter(
+            Trade.ts >= cutoff,
+            Trade.backtest_id == None,  # 백테스트 시뮬레이션 제외, 실제 라이브 거래만
+        ).all()
         session.close()
         buys = [r for r in rows if (r.side or '').lower() == 'buy']
         sells = [r for r in rows if (r.side or '').lower() == 'sell']
