@@ -178,3 +178,20 @@ class PositionState(Base):
     avg_buy_price = Column(Float, default=0.0)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+
+class SystemState(Base):
+    """Persistent key-value store for system-wide control flags.
+
+    Survives Kubernetes pod restarts (unlike .env file writes to ephemeral storage).
+    Used by the panic endpoint and LiveExecutor env-watcher to persist and read
+    the ENABLE_AUTO_LIVE flag across process restarts.
+
+    Common keys:
+      'enable_auto_live' — '1' (trading active) or '0' (panic / halted)
+    """
+    __tablename__ = 'system_state'
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True, index=True, nullable=False)
+    value = Column(String, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+

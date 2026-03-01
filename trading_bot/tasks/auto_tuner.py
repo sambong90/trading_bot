@@ -198,6 +198,14 @@ def main():
     finally:
         session.close()
 
+    # [H3] 새 파라미터가 저장됐으므로 param_manager 캐시를 즉시 무효화.
+    # 다음 get_best_params() 호출 시 방금 저장된 최신 combo를 반영한다.
+    try:
+        from trading_bot.param_manager import invalidate_cache
+        invalidate_cache()
+    except Exception:
+        pass
+
     # ── AI Reviewer 순차 실행: 튜닝 완료 직후 브리핑 생성 ──────────────────
     # 독립 cron 대신 여기서 직접 호출하여 레이스 컨디션 완전 제거.
     # 예외 발생 시 튜닝 결과에 영향 없이 오류만 출력.

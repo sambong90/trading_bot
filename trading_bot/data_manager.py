@@ -2,6 +2,7 @@
 # data.py 및 DB 기반 래퍼
 import pandas as pd
 import numpy as np
+from datetime import timezone as _tz
 from ta.volume import OnBalanceVolumeIndicator
 from trading_bot.data import fetch_ohlcv_from_db
 
@@ -82,17 +83,53 @@ def _atr(high, low, close, period=14):
 
 
 def _adx(high, low, close, period=14):
+    """
+    [M3 FIX] Standard Wilder's ADX.
+
+    Primary path  : TA-Lib talib.ADX() — industry-standard, matches TradingView.
+    Fallback path : Wilder's EMA (alpha=1/period) applied to +DM, -DM, TR.
+                    The previous rolling-sum approach underestimated ADX and did not
+                    match external references; this corrects that.
+    """
+    # --- TA-Lib path (preferred) ---
+    try:
+        import talib
+        h = high.to_numpy(dtype=float)
+        l = low.to_numpy(dtype=float)
+        c = close.to_numpy(dtype=float)
+        adx_vals = talib.ADX(h, l, c, timeperiod=period)
+        return pd.Series(adx_vals, index=high.index).fillna(0)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # --- Wilder's EMA fallback (correct smoothing) ---
+    alpha = 1.0 / period
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
     prev_close = close.shift(1)
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-    tr = _atr(high, low, close, period=1)
-    tr = tr.rolling(period).sum()
-    plus_di = 100 * (plus_dm.rolling(period).sum() / tr.replace(0, np.nan))
-    minus_di = 100 * (minus_dm.rolling(period).sum() / tr.replace(0, np.nan))
+
+    # Raw directional movement
+    up_move = high - prev_high
+    dn_move = prev_low - low
+    plus_dm = up_move.where((up_move > dn_move) & (up_move > 0), 0.0)
+    minus_dm = dn_move.where((dn_move > up_move) & (dn_move > 0), 0.0)
+
+    # True Range
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    # Wilder's smoothing (EWM with alpha=1/period, adjust=False)
+    tr_s = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=alpha, adjust=False).mean() / tr_s.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=alpha, adjust=False).mean() / tr_s.replace(0, np.nan))
+
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.rolling(period).mean()
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
     return adx.fillna(0)
 
 
@@ -150,8 +187,37 @@ def compute_indicators(df, ema_short=None, ema_long=None, rsi_period=None, atr_p
     return df
 
 
+def _float_or_none(val):
+    if val is None:
+        return None
+    try:
+        v = float(val)
+        return v if np.isfinite(v) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_ts(ts):
+    """Datetime을 timezone-naive UTC로 정규화 (DB/pandas 비교용)."""
+    if ts is None:
+        return None
+    if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
+        try:
+            return ts.astimezone(_tz.utc).replace(tzinfo=None)
+        except Exception:
+            pass
+    return ts
+
+
 def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
-    """OHLCV로 지표 계산 후 technical_indicators에 저장. df_ohlcv 없으면 DB에서 로드."""
+    """
+    OHLCV로 지표 계산 후 technical_indicators에 저장.
+
+    [H2 FIX] N+1 개별 SELECT → PostgreSQL UPSERT (1 쿼리) 또는
+    두 단계 bulk INSERT/UPDATE (2 쿼리) 로 교체.
+    기존: ticker당 200회 SELECT → 60 ticker × 200 = 12,000 쿼리/사이클.
+    개선: ticker당 1~2 쿼리 → 60 ticker × 2 = 120 쿼리/사이클.
+    """
     from trading_bot.db import get_session
     from trading_bot.models import TechnicalIndicator
     from trading_bot.param_manager import get_best_params
@@ -172,87 +238,96 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
     if df is None:
         return False
 
-    def _float_or_none(val):
-        if val is None:
-            return None
-        try:
-            v = float(val)
-            return v if np.isfinite(v) else None
-        except (TypeError, ValueError):
-            return None
+    # --- 저장 행 목록 구성 (pandas 순회 — DB 호출 없음) ---
+    to_save = df.tail(200)
+    rows = []
+    for idx in range(len(to_save)):
+        row = to_save.iloc[idx]
+        ts = row.get('time') or row.name
+        if hasattr(ts, 'to_pydatetime'):
+            ts = ts.to_pydatetime()
+        ts = _normalize_ts(ts)  # timezone-naive UTC 정규화
+
+        adx = _float_or_none(row.get('adx')) or 0.0
+        atr_raw = _float_or_none(row.get('atr_raw')) or _float_or_none(row.get('atr'))
+        indicators = {
+            'adx': adx,
+            'bb_lower': _float_or_none(row.get('bb_lower')),
+            'bb_middle': _float_or_none(row.get('bb_middle')),
+            'bb_upper': _float_or_none(row.get('bb_upper')),
+            'atr_raw': atr_raw,
+            'obv': _float_or_none(row.get('obv')),
+            'obv_sma': _float_or_none(row.get('obv_sma')),
+            'bb_width': _float_or_none(row.get('bb_width')),
+        }
+        rows.append({
+            'ticker': ticker,
+            'timeframe': timeframe,
+            'ts': ts,
+            'sma_short': _float_or_none(row.get('sma_short')),
+            'sma_long': _float_or_none(row.get('sma_long')),
+            'ema_short': _float_or_none(row.get('ema_short')) or 0.0,
+            'ema_long': _float_or_none(row.get('ema_long')) or 0.0,
+            'rsi': _float_or_none(row.get('rsi')) or 50.0,
+            'atr': _float_or_none(row.get('atr')) or 0.0,
+            'volume_ma': _float_or_none(row.get('volume_ma')) or 0.0,
+            'indicators': indicators,
+        })
+
+    if not rows:
+        return False
 
     session = get_session()
     try:
-        to_save = df.tail(200)
-        for idx in range(len(to_save)):
-            row = to_save.iloc[idx]
-            ts = row.get('time') or row.name
-            if hasattr(ts, 'to_pydatetime'):
-                ts = ts.to_pydatetime()
-            try:
-                if hasattr(ts, 'tzinfo') and ts.tzinfo:
-                    ts = pd.Timestamp(ts).tz_localize(None).to_pydatetime()
-            except Exception:
-                pass
-            # _float_or_none: NaN/Inf → None. 스칼라 컬럼은 or로 fallback, JSON 컬럼은 None 허용.
-            ema_s = _float_or_none(row.get('ema_short')) or 0.0
-            ema_l = _float_or_none(row.get('ema_long')) or 0.0
-            rsi = _float_or_none(row.get('rsi')) or 50.0
-            atr = _float_or_none(row.get('atr')) or 0.0
-            vol_ma = _float_or_none(row.get('volume_ma')) or 0.0
-            # indicators JSON 컬럼: NaN → None(null) → PostgreSQL JSON 허용
-            adx = _float_or_none(row.get('adx')) or 0.0
-            atr_raw = _float_or_none(row.get('atr_raw')) or _float_or_none(row.get('atr'))
-            bb_l = _float_or_none(row.get('bb_lower'))
-            bb_m = _float_or_none(row.get('bb_middle'))
-            bb_u = _float_or_none(row.get('bb_upper'))
-            obv = _float_or_none(row.get('obv'))
-            obv_sma = _float_or_none(row.get('obv_sma'))
-            bb_width = _float_or_none(row.get('bb_width'))
-            indicators = {
-                'adx': adx,
-                'bb_lower': bb_l,
-                'bb_middle': bb_m,
-                'bb_upper': bb_u,
-                'atr_raw': atr_raw,
-                'obv': obv,
-                'obv_sma': obv_sma,
-                'bb_width': bb_width,
-            }
-            existing = session.query(TechnicalIndicator).filter(
+        # --- 1차 시도: PostgreSQL UPSERT (1 쿼리, K8s 프로덕션 경로) ---
+        try:
+            from sqlalchemy.dialects.postgresql import insert as _pg_insert
+            _UPDATE_COLS = ['sma_short', 'sma_long', 'ema_short', 'ema_long',
+                            'rsi', 'atr', 'volume_ma', 'indicators']
+            stmt = _pg_insert(TechnicalIndicator).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                constraint='u_tech_ticker_timeframe_ts',
+                set_={col: stmt.excluded[col] for col in _UPDATE_COLS},
+            )
+            session.execute(stmt)
+            session.commit()
+            return True
+        except ImportError:
+            pass  # SQLite 환경 → 2단계 fallback
+        except Exception:
+            session.rollback()
+            # PostgreSQL인데 실패한 경우 fallback 시도
+            pass
+
+        # --- 2차 시도: 2쿼리 bulk INSERT + bulk UPDATE (SQLite / fallback) ---
+        # 기존 타임스탬프를 한 번에 조회 (1 SELECT)
+        existing = {
+            _normalize_ts(r.ts): r.id
+            for r in session.query(TechnicalIndicator.ts, TechnicalIndicator.id).filter(
                 TechnicalIndicator.ticker == ticker,
                 TechnicalIndicator.timeframe == timeframe,
-                TechnicalIndicator.ts == ts,
-            ).first()
-            if existing:
-                existing.sma_short = _float_or_none(row.get('sma_short'))
-                existing.sma_long = _float_or_none(row.get('sma_long'))
-                existing.ema_short = ema_s
-                existing.ema_long = ema_l
-                existing.rsi = rsi
-                existing.atr = atr
-                existing.volume_ma = vol_ma
-                existing.indicators = indicators
+            ).all()
+        }
+
+        to_insert = []
+        to_update = []
+        for r in rows:
+            norm_ts = _normalize_ts(r['ts'])
+            if norm_ts in existing:
+                to_update.append({'id': existing[norm_ts], **r})
             else:
-                rec = TechnicalIndicator(
-                    ticker=ticker,
-                    timeframe=timeframe,
-                    ts=ts,
-                    sma_short=_float_or_none(row.get('sma_short')),
-                    sma_long=_float_or_none(row.get('sma_long')),
-                    ema_short=ema_s,
-                    ema_long=ema_l,
-                    rsi=rsi,
-                    atr=atr,
-                    volume_ma=vol_ma,
-                    indicators=indicators,
-                )
-                session.add(rec)
+                to_insert.append(r)
+
+        if to_insert:
+            session.bulk_insert_mappings(TechnicalIndicator, to_insert)
+        if to_update:
+            session.bulk_update_mappings(TechnicalIndicator, to_update)
+
         session.commit()
         return True
+
     except Exception:
         session.rollback()
         return False
     finally:
         session.close()
-

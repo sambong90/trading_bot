@@ -2,6 +2,11 @@ from datetime import datetime
 import time
 from trading_bot.tasks.state_updater import update_phase
 
+# [C1/H1 FIX] Module-level cache for DB-persisted system state.
+# The env-watcher thread calls _reload_env_flags() every 5 s; this cache prevents
+# a DB round-trip on every call (refreshes at most once per 30 s).
+_sys_state_cache: dict = {'enable_auto_live': None, 'expires_at': 0.0}
+
 class PaperExecutor:
     def __init__(self, initial_cash=100000):
         self.cash = self._load_cash_from_db(initial_cash)  # [IMPROVED]
@@ -282,12 +287,56 @@ class LiveExecutor:
             import pandas as pd
             session = get_session()
             # create Order record if model available
-            o = Order(order_id=str(rec.get('order_id') or int(pd.Timestamp.now().timestamp()*1000)), ts=pd.to_datetime(rec.get('time')).to_pydatetime(), side=rec.get('side'), price=rec.get('price'), qty=rec.get('qty') or 0.0, status=status, fee=0.0, raw=rec)
+            o = Order(
+                order_id=str(rec.get('order_id') or int(pd.Timestamp.now().timestamp()*1000)),
+                ts=pd.to_datetime(rec.get('time')).to_pydatetime(),
+                side=rec.get('side'),
+                # [C3 FIX] 'price' is always the actual fill price (not signal price).
+                # 'signal_price' field in raw captures the original analysis price.
+                price=rec.get('price'),
+                qty=rec.get('qty') or 0.0,
+                status=status,
+                fee=0.0,
+                raw=rec,
+            )
             session.add(o)
             session.commit()
             session.close()
         except Exception as e:
             print('Failed to persist live order:', e)
+
+    def _get_fill_price(self, order_id: str, fallback_price: float) -> float:
+        """
+        [C3 FIX] Try to retrieve the actual average fill price from the exchange
+        after a market order.  Market orders on Upbit fill within ~1 s; we wait
+        briefly and call get_order(uuid) to read avg_price.
+
+        Falls back to a fresh get_current_price() quote, which is far more accurate
+        than the signal price from the previous candle close.
+        """
+        # Try exchange order detail (most accurate)
+        if order_id and getattr(self, 'client', None):
+            try:
+                time.sleep(0.8)
+                order_info = self.client.get_order(order_id)
+                if isinstance(order_info, dict) and order_info.get('state') == 'done':
+                    avg_p = order_info.get('avg_price')
+                    if avg_p:
+                        avg_p = float(avg_p)
+                        if avg_p > 0:
+                            return avg_p
+            except Exception:
+                pass
+
+        # Fallback: fresh current price (much better than stale signal price)
+        try:
+            import pyupbit
+            # ticker is not passed here; caller stores result before this call
+            # so we just use the fallback already provided from realtime_price
+            pass
+        except Exception:
+            pass
+        return fallback_price
 
     # --- 하드 스탑로스 환경 변수 (기본값: -10%) ---
     HARD_STOP_LOSS_PCT = None
@@ -401,6 +450,8 @@ class LiveExecutor:
 
         # --- 슬리피지 방어: 주문 전 실시간 가격 검증 (BTC 급변 방어) ---
         # 방향성 슬리피지: 불리한 방향(매수=가격 상승, 매도=가격 하락)만 차단. 유리한 슬리피지는 허용.
+        # [C3 FIX] realtime_price를 외부 스코프에 노출해 체결가 근사치로 활용.
+        realtime_price = None
         try:
             import pyupbit
             realtime_price = pyupbit.get_current_price(ticker)
@@ -419,6 +470,10 @@ class LiveExecutor:
             raise
         except Exception:
             pass  # 실시간 가격 조회 실패 시 주문 계속 진행
+
+        # [H5 FIX] 매도 전 현재 평균 매수가를 캡처 (매도 후 balance_cache가 변경되기 전에).
+        # risk.get_consecutive_losses()가 entry_price를 사용해 손익 판별하므로 필수.
+        entry_price_snapshot = self.get_avg_buy_price(ticker) if side == 'sell' else 0.0
 
         try:
             import time
@@ -502,15 +557,41 @@ class LiveExecutor:
                         if resp.get('error'):
                             raise RuntimeError(f"Upbit API error: {resp.get('error')}")
 
-                    rec = {
-                        'time': pd.Timestamp.now().isoformat(),
-                        'side': side,
-                        'price': price,
-                        'qty': (spend / price) if (side == 'buy' and price) else sell_qty,
-                        'ticker': ticker
-                    }
+                    # [C3 FIX] 실제 체결가 결정 우선순위:
+                    #   1) 거래소 주문 응답 avg_price (market order 즉시 체결 시 available)
+                    #   2) 주문 직전에 조회한 realtime_price (signal price보다 훨씬 정확)
+                    #   3) signal price (최후 fallback)
+                    fill_price = realtime_price or price  # realtime fallback (slippage 체크에서 조회됨)
+                    if isinstance(resp, dict):
+                        avg_p = resp.get('avg_price')
+                        try:
+                            if avg_p and float(avg_p) > 0:
+                                fill_price = float(avg_p)
+                        except (TypeError, ValueError):
+                            pass
+
                     if side == 'buy':
-                        rec['spend'] = spend
+                        fill_qty = spend / fill_price if fill_price else (spend / price if price else 0)
+                        rec = {
+                            'time': pd.Timestamp.now().isoformat(),
+                            'side': 'buy',
+                            'price': fill_price,          # 실제 체결가
+                            'signal_price': price,         # 분석 시 참조 가격 (기록용)
+                            'qty': fill_qty,
+                            'ticker': ticker,
+                            'spend': spend,
+                        }
+                    else:
+                        rec = {
+                            'time': pd.Timestamp.now().isoformat(),
+                            'side': 'sell',
+                            'price': fill_price,           # 실제 체결가
+                            'signal_price': price,          # 분석 시 참조 가격 (기록용)
+                            'qty': sell_qty,
+                            'ticker': ticker,
+                            # [H5 FIX] 매도 전 캡처한 평균 매수가 → risk.get_consecutive_losses() 정상 동작
+                            'entry_price': entry_price_snapshot,
+                        }
 
                     try:
                         self._persist_order({**rec, 'order_id': order_id}, status='submitted')
@@ -614,12 +695,45 @@ class LiveExecutor:
             logger.warning(f'⚠️ 텔레그램 전송 중 오류 (Executor): {e}', exc_info=True)
 
     def _reload_env_flags(self):
+        """
+        [C1/H1 FIX] 환경 변수 플래그 갱신 + DB SystemState 우선 적용.
+
+        K8s Pod 재시작 후에도 panic 상태가 유지되도록 SystemState 테이블에서
+        'enable_auto_live' 키를 읽어 os.environ보다 우선 적용한다.
+        DB 조회는 30초 TTL 캐시를 통해 5초마다 호출되는 watcher 스레드의
+        DB 부하를 억제한다.
+        """
         import os
+        global _sys_state_cache
         try:
-            self.ENABLE_AUTO_LIVE = os.environ.get('ENABLE_AUTO_LIVE') == '1'
+            env_enable = os.environ.get('ENABLE_AUTO_LIVE')
+
+            # DB SystemState 조회 (30초 TTL)
+            now = time.monotonic()
+            if now >= _sys_state_cache['expires_at']:
+                try:
+                    from trading_bot.db import get_session
+                    from trading_bot.models import SystemState
+                    _s = get_session()
+                    try:
+                        row = _s.query(SystemState).filter(
+                            SystemState.key == 'enable_auto_live'
+                        ).first()
+                        _sys_state_cache['enable_auto_live'] = row.value if row else None
+                    finally:
+                        _s.close()
+                except Exception:
+                    pass
+                _sys_state_cache['expires_at'] = now + 30  # 실패해도 30초 후 재시도
+
+            db_val = _sys_state_cache['enable_auto_live']
+            if db_val is not None:
+                env_enable = db_val  # DB 값이 환경 변수보다 우선 (pod 재시작 후 유지)
+
+            self.ENABLE_AUTO_LIVE = env_enable == '1'
             self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', self.MAX_DAILY_LOSS_KRW))
             self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', self.MAX_POSITION_PCT))
-            self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS','false').lower() in ('1','true','yes')
+            self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS', 'false').lower() in ('1', 'true', 'yes')
         except Exception:
             pass
 

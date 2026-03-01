@@ -288,35 +288,40 @@ def cmd_resume(from_user_id: str) -> str:
 
 
 def cmd_panic(from_user_id: str) -> str:
+    """
+    [H1 FIX] .env 파일 쓰기 제거 → DB SystemState에 영구 저장.
+    K8s Pod 재시작 시 Ephemeral Storage의 .env 수정은 소실되지만,
+    PostgreSQL SystemState 테이블 기록은 재시작 후에도 유지된다.
+    LiveExecutor._reload_env_flags()가 30초 TTL로 이 값을 읽는다.
+    """
     if ADMIN_USER_ID and from_user_id != ADMIN_USER_ID:
         return '🚫 권한 없음: 관리자만 패닉 버튼을 사용할 수 있습니다.'
     results = []
 
-    # 1) .env ENABLE_AUTO_LIVE=0
-    if ENV_PATH.exists():
+    # 1) DB SystemState에 ENABLE_AUTO_LIVE=0 영구 저장 (pod 재시작 후에도 유지)
+    try:
+        from trading_bot.db import get_session, engine
+        from trading_bot.models import Base, SystemState
         try:
-            with open(ENV_PATH, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            new_lines = []
-            found = False
-            for L in lines:
-                if L.strip().startswith('ENABLE_AUTO_LIVE='):
-                    new_lines.append('ENABLE_AUTO_LIVE=0\n')
-                    found = True
-                else:
-                    new_lines.append(L)
-            if not found:
-                new_lines.append('ENABLE_AUTO_LIVE=0\n')
-            with open(ENV_PATH, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
-            os.environ['ENABLE_AUTO_LIVE'] = '0'
-            results.append('✅ ENABLE_AUTO_LIVE=0 적용')
-        except Exception as e:
-            results.append(f'⚠️ .env 수정 실패: {html.escape(str(e))}')
-    else:
-        results.append('⚠️ .env 파일 없음 — ENABLE_AUTO_LIVE 수정 건너뜀')
+            Base.metadata.create_all(engine, tables=[SystemState.__table__])
+        except Exception:
+            pass
+        session = get_session()
+        try:
+            row = session.query(SystemState).filter(SystemState.key == 'enable_auto_live').first()
+            if row:
+                row.value = '0'
+            else:
+                session.add(SystemState(key='enable_auto_live', value='0'))
+            session.commit()
+        finally:
+            session.close()
+        os.environ['ENABLE_AUTO_LIVE'] = '0'
+        results.append('✅ ENABLE_AUTO_LIVE=0 DB 영구 저장 (pod 재시작 후에도 유지)')
+    except Exception as e:
+        results.append(f'⚠️ DB 저장 실패: {html.escape(str(e))}')
 
-    # 2) bot_control.json paused=true
+    # 2) bot_control.json paused=true (매매 사이클 즉시 정지)
     try:
         ctrl = _read_control()
         ctrl['paused'] = True
@@ -333,7 +338,7 @@ def cmd_panic(from_user_id: str) -> str:
         f'🛑 <b>패닉 버튼 실행됨</b>\n\n'
         f'{status_block}\n\n'
         f'자동 라이브 매매가 중지됩니다.\n'
-        f'재개하려면 .env에서 <code>ENABLE_AUTO_LIVE=1</code>로 변경 후 /resume 을 보내세요.'
+        f'재개하려면 관리자가 DB에서 <code>enable_auto_live=1</code>로 변경 후 /resume 을 보내세요.'
     )
 
 

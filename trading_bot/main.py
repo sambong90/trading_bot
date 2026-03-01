@@ -10,29 +10,48 @@ app = Flask(__name__)
 
 @app.route('/panic', methods=['POST'])
 def panic():
+    """
+    [C1 FIX] API Key 인증 추가 — 미인증 요청은 401 반환.
+    [H1 FIX] .env 파일 대신 DB SystemState에 상태 저장.
+              K8s Ephemeral Storage에 기록해도 Pod 재시작 시 소실되는 .env 파일
+              쓰기를 제거하고 PostgreSQL SystemState 테이블에 영구 저장한다.
+              LiveExecutor._reload_env_flags()가 이 값을 읽어 ENABLE_AUTO_LIVE를
+              결정하므로 재시작 후에도 panic 상태가 유지된다.
+    """
+    # --- API Key 인증 ---
+    expected_key = os.environ.get('FLASK_API_KEY', '')
+    if not expected_key:
+        return jsonify({'ok': False, 'error': 'Panic endpoint unavailable: FLASK_API_KEY not configured'}), 503
+    if request.headers.get('X-API-Key', '') != expected_key:
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+
     try:
-        # disable auto live immediately
-        import dotenv, os
-        dotenv_path='trading_bot/.env'
-        # update env file (simple append toggle)
-        with open(dotenv_path,'r') as f:
-            lines=f.readlines()
-        new=[]
-        found=False
-        for L in lines:
-            if L.startswith('ENABLE_AUTO_LIVE='):
-                new.append('ENABLE_AUTO_LIVE=0\n')
-                found=True
+        from trading_bot.db import get_session, engine
+        from trading_bot.models import Base, SystemState
+
+        # SystemState 테이블이 없으면 생성 (초기 배포 시 안전망)
+        try:
+            Base.metadata.create_all(engine, tables=[SystemState.__table__])
+        except Exception:
+            pass
+
+        session = get_session()
+        try:
+            row = session.query(SystemState).filter(SystemState.key == 'enable_auto_live').first()
+            if row:
+                row.value = '0'
             else:
-                new.append(L)
-        if not found:
-            new.append('ENABLE_AUTO_LIVE=0\n')
-        with open(dotenv_path,'w') as f:
-            f.writelines(new)
+                session.add(SystemState(key='enable_auto_live', value='0'))
+            session.commit()
+        finally:
+            session.close()
+
+        # 현재 프로세스 환경 변수도 즉시 갱신 (env-watcher 스레드가 다음 5초 tick 전에도 반영)
         os.environ['ENABLE_AUTO_LIVE'] = '0'
-        return jsonify({'ok':True,'msg':'AUTO LIVE disabled'})
+
+        return jsonify({'ok': True, 'msg': 'AUTO LIVE disabled (persisted to DB — survives pod restart)'})
     except Exception as e:
-        return jsonify({'ok':False,'error':str(e)})
+        return jsonify({'ok': False, 'error': str(e)})
 
 
 import os
