@@ -1,5 +1,6 @@
 from datetime import datetime
 import time
+import threading
 from trading_bot.tasks.state_updater import update_phase
 
 # [C1/H1 FIX] Module-level cache for DB-persisted system state.
@@ -9,6 +10,9 @@ _sys_state_cache: dict = {'enable_auto_live': None, 'expires_at': 0.0}
 
 class PaperExecutor:
     def __init__(self, initial_cash=100000):
+        # [C4 FIX] Lock protects self.cash and self.positions from concurrent
+        # access by Flask request threads and the Telegram bot thread.
+        self._lock = threading.Lock()
         self.cash = self._load_cash_from_db(initial_cash)  # [IMPROVED]
         # 티커별 포지션: { ticker: {'qty': float, 'avg_price': float}, ... }
         self.positions = self._load_positions_from_db()  # [NEW]
@@ -133,10 +137,15 @@ class PaperExecutor:
         """
         Paper 모드 주문. 티커별 포지션(qty, 평균단가)을 독립 관리.
         LiveExecutor와 시그니처 동일: side, price, size_pct, ticker.
+        [C4 FIX] self._lock으로 self.cash / self.positions 동시 접근 보호.
         """
         import logging
         _logger = logging.getLogger(__name__)
+        with self._lock:
+            return self._place_order_locked(side, price, size_pct, ticker, _logger)
 
+    def _place_order_locked(self, side, price, size_pct, ticker, _logger):
+        """Inner implementation of place_order; called with self._lock already held."""
         # validation
         self._update_stage('C.validation', 20)
         time.sleep(0.01)
@@ -225,19 +234,23 @@ class PaperExecutor:
 
     def get_position_qty(self, ticker):
         """해당 티커 보유 수량. Paper는 로컬 positions 기준."""
-        return float(self.positions.get(ticker, {}).get('qty', 0) or 0)
+        with self._lock:
+            return float(self.positions.get(ticker, {}).get('qty', 0) or 0)
 
     def get_avg_buy_price(self, ticker):
         """해당 티커 평균 매수가. Paper는 로컬 positions 기준."""
-        return float(self.positions.get(ticker, {}).get('avg_price', 0) or 0)
+        with self._lock:
+            return float(self.positions.get(ticker, {}).get('avg_price', 0) or 0)
 
     def get_available_cash(self):
         """가용 현금(KRW). Two-Pass Pass 2 매수 한도 판단용."""
-        return float(self.cash)
+        with self._lock:
+            return float(self.cash)
 
     def get_cash(self):
         """가용 현금(KRW). get_available_cash()와 동일. 호출부 호환용."""
-        return float(self.cash)
+        with self._lock:
+            return float(self.cash)
 
 class LiveExecutor:
     ENABLE_AUTO_LIVE = None  # populated from env at init

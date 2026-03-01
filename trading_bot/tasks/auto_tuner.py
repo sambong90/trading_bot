@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-Walk-Forward Auto Tuner (V5.0): fetches 30 days of 1h OHLCV for KRW-BTC and KRW-SOL,
-runs grid_search to find the best param combo by final_value, and saves the best to TuningRun.
+Walk-Forward Auto Tuner (V5.1): fetches 30 days of 1h OHLCV for KRW-BTC and KRW-SOL,
+runs IS/OOS grid search (70/30 split) to find the best param combo by composite score
+(Sharpe + return - MDD), and saves the best to TuningRun.
 Designed to be run by scheduler (e.g. every Sunday 04:00).
+
+V5.1 추가사항 (L4 FIX):
+  - IS/OOS 70/30 walk-forward split: 과적합 방지
+  - Composite score = 0.4 × total_return + 0.4 × sharpe_norm − 0.2 × mdd
+    (final_value 단독 선택에서 Sharpe/MDD 통합 평가로 교체)
+  - OOS quality gate: OOS 복합점수 < IS 복합점수 × 0.40 이면 경고 (저장은 유지)
 
 V5.0 추가사항:
   - macro_ema_long [5, 20, 30, 50, 100] 을 param_grid에 추가
@@ -10,6 +17,7 @@ V5.0 추가사항:
     1h 백테스트 중 각 봉의 시점에서 Macro Trend Filter를 시뮬레이션
     (현재가 < 일봉 EMA(macro_ema_long) → 매수 차단)
 """
+import itertools
 import os
 import sys
 import pathlib
@@ -26,7 +34,6 @@ except Exception:
 import pandas as pd
 from trading_bot.data import fetch_ohlcv
 from trading_bot.data_manager import compute_indicators
-from trading_bot.tuner import grid_search
 from trading_bot.backtest import simple_backtest
 from trading_bot.db import get_session
 from trading_bot.models import TuningRun
@@ -34,6 +41,29 @@ from trading_bot.models import TuningRun
 COUNT_30D_1H = 30 * 24   # 720 bars (1h 전략 평가용)
 COUNT_DAY = 200           # 일봉 200개 (macro_ema_long=100 기준 충분한 워밍업)
 TICKERS = ['KRW-BTC', 'KRW-SOL']
+
+IS_RATIO = 0.70           # In-Sample 비율 (70%)
+OOS_GATE = 0.40           # OOS 복합점수가 IS의 40% 미만이면 과적합 경고
+INITIAL_CASH = 100_000.0
+FEE_PCT = 0.0005
+SLIPPAGE_PCT = 0.0005
+
+
+def _composite_score(metrics: dict, final_value: float) -> float:
+    """[L4 FIX] Composite tuning objective: 0.4×return + 0.4×sharpe_norm − 0.2×mdd.
+
+    - total_return: (final_value / INITIAL_CASH) - 1  (e.g. 0.15 for 15% gain)
+    - sharpe_norm:  raw Sharpe / 4.0  (normalises typical [-2, 4] range to [-0.5, 1])
+    - mdd:          absolute max-drawdown fraction (e.g. 0.20 for 20% drawdown)
+    Returns 0.0 if metrics is empty / None.
+    """
+    if not metrics:
+        return 0.0
+    total_return = (float(final_value) / INITIAL_CASH) - 1.0
+    sharpe = float(metrics.get('sharpe') or 0.0)
+    mdd = abs(float(metrics.get('mdd') or 0.0))
+    sharpe_norm = sharpe / 4.0
+    return 0.4 * total_return + 0.4 * sharpe_norm - 0.2 * mdd
 
 
 def make_strategy_fn(daily_df_btc):
@@ -120,10 +150,54 @@ def make_strategy_fn(daily_df_btc):
     return _strategy_fn
 
 
-def _backtest_fn(df_signals, fee_pct=0.0005, slippage_pct=0.0005):
+def _run_backtest(df_signals):
+    """Run simple_backtest and return (final_value, metrics)."""
     if df_signals is None or len(df_signals) == 0:
-        return {'final_value': 0.0, 'trades': []}
-    return simple_backtest(df_signals, initial_cash=100000, fee_pct=fee_pct, slippage_pct=slippage_pct)
+        return INITIAL_CASH, {}
+    result = simple_backtest(df_signals, initial_cash=INITIAL_CASH,
+                             fee_pct=FEE_PCT, slippage_pct=SLIPPAGE_PCT)
+    return float(result.get('final_value', INITIAL_CASH)), result.get('metrics') or {}
+
+
+def _grid_search_is(strategy_fn, df_is, param_grid):
+    """[L4 FIX] IS grid search returning (best_combo, best_is_score, best_is_metrics).
+
+    Iterates all valid (ema_short < ema_long) combos on the IS slice and picks
+    the one with the highest composite score.
+    """
+    combos = list(itertools.product(
+        param_grid['ema_short'],
+        param_grid['ema_long'],
+        param_grid['adx_trend_threshold'],
+        param_grid['macro_ema_long'],
+    ))
+    best_score = float('-inf')
+    best_combo = None
+    best_metrics = {}
+    best_fv = INITIAL_CASH
+
+    for ema_short, ema_long, adx_thresh, macro_ema_long in combos:
+        if ema_short >= ema_long:
+            continue  # invalid — skip
+        params = {
+            'ema_short': ema_short,
+            'ema_long': ema_long,
+            'adx_trend_threshold': adx_thresh,
+            'macro_ema_long': macro_ema_long,
+        }
+        try:
+            df_sig = strategy_fn(df_is.copy(), **params)
+            fv, metrics = _run_backtest(df_sig)
+            score = _composite_score(metrics, fv)
+            if score > best_score:
+                best_score = score
+                best_combo = params
+                best_metrics = metrics
+                best_fv = fv
+        except Exception:
+            continue
+
+    return best_combo, best_score, best_metrics, best_fv
 
 
 def main():
@@ -147,9 +221,12 @@ def main():
         'adx_trend_threshold': [20, 25, 30],
         'macro_ema_long': [5, 20, 30, 50, 100],
     }
-    total_combos = 3 * 3 * 3 * 5  # = 135
+    valid_combos = sum(
+        1 for es, el in itertools.product(param_grid['ema_short'], param_grid['ema_long'])
+        if es < el
+    ) * len(param_grid['adx_trend_threshold']) * len(param_grid['macro_ema_long'])
     print(f'[auto_tuner] Grid: {param_grid}')
-    print(f'[auto_tuner] Total combos: {total_combos}')
+    print(f'[auto_tuner] Valid combos (ema_short < ema_long): {valid_combos}')
 
     all_results = []
     for ticker in TICKERS:
@@ -160,36 +237,86 @@ def main():
             continue
         if 'time' not in df.columns and df.index.name is not None:
             df = df.reset_index()
-        print(f'[auto_tuner] Grid search on {ticker} ({len(df)} rows)...')
-        df_res = grid_search(
-            strategy_fn,
-            df,
-            param_grid,
-            _backtest_fn,
-            fee_pct=0.0005,
-            slippage_pct=0.0005,
+
+        # ── [L4 FIX] IS/OOS 70/30 walk-forward split ─────────────────────────
+        n = len(df)
+        is_end = int(n * IS_RATIO)
+        df_is = df.iloc[:is_end].copy()
+        df_oos = df.iloc[is_end:].copy()
+        print(f'[auto_tuner] {ticker}: {n} bars total → IS={is_end}, OOS={n - is_end}')
+
+        # ── IS grid search (composite score) ─────────────────────────────────
+        best_combo, is_score, is_metrics, is_fv = _grid_search_is(strategy_fn, df_is, param_grid)
+        if best_combo is None:
+            print(f'[auto_tuner] {ticker}: no valid IS result, skipping')
+            continue
+        print(
+            f'[auto_tuner] {ticker} IS best: {best_combo} '
+            f'(score={is_score:.4f}, fv={is_fv:.0f}, '
+            f'sharpe={is_metrics.get("sharpe", 0):.2f}, mdd={is_metrics.get("mdd", 0):.2%})'
         )
-        for _, row in df_res.iterrows():
-            params = row.get('params') if isinstance(row.get('params'), dict) else {}
-            fv = row.get('final_value')
-            all_results.append({'ticker': ticker, 'combo': params, 'final_value': fv})
+
+        # ── OOS validation ────────────────────────────────────────────────────
+        oos_score = 0.0
+        oos_metrics = {}
+        oos_fv = INITIAL_CASH
+        try:
+            df_sig_oos = strategy_fn(df_oos.copy(), **best_combo)
+            oos_fv, oos_metrics = _run_backtest(df_sig_oos)
+            oos_score = _composite_score(oos_metrics, oos_fv)
+        except Exception as e:
+            print(f'[auto_tuner] {ticker} OOS backtest failed: {e}')
+
+        print(
+            f'[auto_tuner] {ticker} OOS:  score={oos_score:.4f}, fv={oos_fv:.0f}, '
+            f'sharpe={oos_metrics.get("sharpe", 0):.2f}, mdd={oos_metrics.get("mdd", 0):.2%}'
+        )
+        gate_threshold = is_score * OOS_GATE
+        if is_score > 0 and oos_score < gate_threshold:
+            print(
+                f'[auto_tuner] WARNING: {ticker} OOS score ({oos_score:.4f}) < '
+                f'IS×{OOS_GATE} ({gate_threshold:.4f}) — possible overfit; saving anyway'
+            )
+
+        all_results.append({
+            'ticker': ticker,
+            'combo': best_combo,
+            'is_score': is_score,
+            'is_fv': is_fv,
+            'is_metrics': is_metrics,
+            'oos_score': oos_score,
+            'oos_fv': oos_fv,
+            'oos_metrics': oos_metrics,
+        })
 
     if not all_results:
         print('[auto_tuner] No results.')
         return
 
-    best = max(all_results, key=lambda x: float(x.get('final_value') or 0))
+    # ── Select best combo across tickers (by IS composite score) ────────────
+    best = max(all_results, key=lambda x: float(x.get('is_score') or 0))
     session = get_session()
     try:
         tr = TuningRun(
             combo=best['combo'],
-            metrics={'final_value': best['final_value'], 'ticker': best['ticker']},
+            metrics={
+                'is_score': best['is_score'],
+                'is_final_value': best['is_fv'],
+                'is_sharpe': best['is_metrics'].get('sharpe'),
+                'is_mdd': best['is_metrics'].get('mdd'),
+                'oos_score': best['oos_score'],
+                'oos_final_value': best['oos_fv'],
+                'oos_sharpe': best['oos_metrics'].get('sharpe'),
+                'oos_mdd': best['oos_metrics'].get('mdd'),
+                'ticker': best['ticker'],
+            },
         )
         session.add(tr)
         session.commit()
         print(
-            f'[auto_tuner] Best combo saved to TuningRun: {best["combo"]} '
-            f'(final_value={best["final_value"]:.2f}, ticker={best["ticker"]})'
+            f'[auto_tuner] Best combo saved: {best["combo"]} '
+            f'(IS score={best["is_score"]:.4f}, OOS score={best["oos_score"]:.4f}, '
+            f'ticker={best["ticker"]})'
         )
         print(f'[auto_tuner] macro_ema_long selected: {best["combo"].get("macro_ema_long", "N/A")}')
     except Exception as e:

@@ -195,3 +195,27 @@ class SystemState(Base):
     value = Column(String, nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
+
+class ExecutionEvent(Base):
+    """Tracks trade execution events for cooldown management.
+
+    [L3 FIX] Replaces the decision_reason tag-scanning on AnalysisResult.
+    Tags: EXEC_BUY, EXEC_SELL, DCA_BUY, PS1, PS2.
+    Indexed on (ticker, ts) and tag for efficient recency/count queries.
+
+    Migration note:
+      CREATE TABLE execution_events (...) — handled by create_all() on first run.
+      Existing DB: trading_bot/db/trading_bot.db 삭제 후 재시작, 또는
+        sqlite3 trading_bot.db < schema_add_execution_events.sql
+    """
+    __tablename__ = 'execution_events'
+    __table_args__ = (Index('idx_exec_events_ticker_ts', 'ticker', 'ts'),)
+    id = Column(Integer, primary_key=True, index=True)
+    ticker = Column(String, index=True, nullable=False)
+    tag = Column(String, index=True, nullable=False)
+    signal = Column(String)
+    price = Column(Float)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+    meta = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+

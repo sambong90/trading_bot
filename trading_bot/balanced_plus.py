@@ -90,18 +90,19 @@ def last_sell_ts(ticker: str):
 
 
 def count_tag_last_24h(ticker: str, tag: str) -> int:
-    """Number of AnalysisResult rows in last 24h where ticker==ticker and decision_reason contains tag."""
+    """Number of ExecutionEvent rows in last 24h where ticker==ticker and tag==tag.
+    [L3 FIX] Uses indexed ExecutionEvent table instead of scanning AnalysisResult.decision_reason text."""
     try:
         from trading_bot.db import get_session
-        from trading_bot.models import AnalysisResult
+        from trading_bot.models import ExecutionEvent
         since = datetime.now(timezone.utc) - timedelta(hours=24)
         session = get_session()
         try:
-            rows = session.query(AnalysisResult).filter(
-                AnalysisResult.ticker == ticker,
-                AnalysisResult.timestamp >= since
-            ).all()
-            return sum(1 for r in rows if r.decision_reason and tag in r.decision_reason)
+            return session.query(ExecutionEvent).filter(
+                ExecutionEvent.ticker == ticker,
+                ExecutionEvent.tag == tag,
+                ExecutionEvent.ts >= since,
+            ).count()
         finally:
             session.close()
     except Exception:
@@ -109,19 +110,18 @@ def count_tag_last_24h(ticker: str, tag: str) -> int:
 
 
 def _last_ts_with_tag(ticker: str, tag: str):
-    """Latest AnalysisResult.timestamp where decision_reason contains tag. None on error."""
+    """Latest ExecutionEvent.ts where ticker==ticker and tag==tag. None on error.
+    [L3 FIX] Direct indexed query on ExecutionEvent instead of scanning 200 AnalysisResult rows."""
     try:
         from trading_bot.db import get_session
-        from trading_bot.models import AnalysisResult
+        from trading_bot.models import ExecutionEvent
         session = get_session()
         try:
-            rows = session.query(AnalysisResult).filter(
-                AnalysisResult.ticker == ticker
-            ).order_by(AnalysisResult.timestamp.desc()).limit(200).all()
-            for r in rows:
-                if r.decision_reason and tag in r.decision_reason and r.timestamp:
-                    return r.timestamp
-            return None
+            row = session.query(ExecutionEvent).filter(
+                ExecutionEvent.ticker == ticker,
+                ExecutionEvent.tag == tag,
+            ).order_by(ExecutionEvent.ts.desc()).limit(1).first()
+            return row.ts if row and row.ts else None
         finally:
             session.close()
     except Exception:
@@ -197,24 +197,23 @@ def count_open_positions(executor, tickers: list) -> int:
 
 
 def log_execution_event(ticker: str, signal: str, tag: str, price: float = None) -> bool:
-    """실행 이벤트(EXEC_BUY/EXEC_SELL/DCA_BUY/PS1/PS2)를 AnalysisResult에 기록.
+    """실행 이벤트(EXEC_BUY/EXEC_SELL/DCA_BUY/PS1/PS2)를 ExecutionEvent 테이블에 기록.
+    [L3 FIX] AnalysisResult.decision_reason 텍스트 태깅 방식에서 전용 테이블로 교체.
     성공 시 True, 실패 시 False 반환 (절대 예외 미발생).
     주의: False 반환 시 쿨다운 태그가 DB에 없어 다음 사이클에서 중복 실행될 수 있음."""
     import logging
     _logger = logging.getLogger(__name__)
     try:
         from trading_bot.db import get_session
-        from trading_bot.models import AnalysisResult
+        from trading_bot.models import ExecutionEvent
         session = get_session()
         try:
-            rec = AnalysisResult(
+            rec = ExecutionEvent(
                 ticker=ticker,
-                timestamp=datetime.now(timezone.utc),
+                tag=tag,
                 signal=signal,
                 price=price,
-                decision_reason=tag,
-                regime=None,
-                position_size=None,
+                ts=datetime.now(timezone.utc),
             )
             session.add(rec)
             session.commit()

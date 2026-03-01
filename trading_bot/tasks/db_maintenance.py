@@ -26,9 +26,11 @@ logger = logging.getLogger(__name__)
 def prune_old_data():
     """
     오래된 데이터 삭제로 DB 용량 및 조회 성능 유지.
-    - TickerSnapshot: 7일 초과 분 삭제
+    - TickerSnapshot: 7일 초과 삭제
     - AnalysisResult: 30일 초과 삭제, 또는 signal=='hold' 이면서 7일 초과 삭제
     - OHLCV, TechnicalIndicator: 90일 초과 삭제
+    - EquityPoint: 30일 초과 삭제 (백테스트 포인트 무한 누적 방지)
+    - TuningRun: 30일 초과 삭제, 단 최신 레코드 1건은 보존 (param_manager fallback용)
     """
     from sqlalchemy import or_, and_
     from trading_bot.db import get_session
@@ -37,6 +39,8 @@ def prune_old_data():
         AnalysisResult,
         OHLCV,
         TechnicalIndicator,
+        EquityPoint,
+        TuningRun,
     )
 
     now = datetime.utcnow()
@@ -67,12 +71,35 @@ def prune_old_data():
         deleted_tech = session.query(TechnicalIndicator).filter(TechnicalIndicator.ts < cutoff_90d).delete(synchronize_session=False)
         logger.info('prune TechnicalIndicator: %s rows (older than 90d)', deleted_tech)
 
+        # [H4 FIX] EquityPoint: 30일 초과 삭제 (백테스트 포인트 무한 누적 방지)
+        deleted_eq = session.query(EquityPoint).filter(EquityPoint.ts < cutoff_30d).delete(synchronize_session=False)
+        logger.info('prune EquityPoint: %s rows (older than 30d)', deleted_eq)
+
+        # [H4 FIX] TuningRun: 30일 초과 삭제, 단 가장 최신 레코드 1건은 보존
+        # (param_manager.get_best_params()가 최신 레코드를 fallback으로 사용하므로 반드시 보존)
+        latest_tuning_id = (
+            session.query(TuningRun.id)
+            .order_by(TuningRun.created_at.desc())
+            .limit(1)
+            .scalar()
+        )
+        if latest_tuning_id is not None:
+            deleted_tr = session.query(TuningRun).filter(
+                TuningRun.created_at < cutoff_30d,
+                TuningRun.id != latest_tuning_id,
+            ).delete(synchronize_session=False)
+        else:
+            deleted_tr = 0
+        logger.info('prune TuningRun: %s rows (older than 30d, latest record kept)', deleted_tr)
+
         session.commit()
         return {
             'ticker_snapshots': deleted_snap,
             'analysis_results': deleted_ar,
             'ohlcv': deleted_ohlcv,
             'technical_indicators': deleted_tech,
+            'equity_points': deleted_eq,
+            'tuning_runs': deleted_tr,
         }
     except Exception as e:
         session.rollback()
