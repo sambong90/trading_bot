@@ -17,6 +17,9 @@ APScheduler>=3.10.0
 # --- Database ORM ---
 SQLAlchemy>=2.0.0
 
+# --- PostgreSQL Driver ---
+psycopg2-binary>=2.9.0
+
 # --- Web Dashboard ---
 flask>=3.0.0
 plotly>=5.0.0
