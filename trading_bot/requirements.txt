@@ -26,3 +26,6 @@ plotly>=5.0.0
 
 # --- Env / Config ---
 python-dotenv
+
+# --- AI Reviewer ---
+anthropic>=0.25.0

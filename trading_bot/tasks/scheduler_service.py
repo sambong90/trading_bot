@@ -68,6 +68,7 @@ PYTHON = str(ROOT / '.venv' / 'bin' / 'python')
 AUTO_SUMMARY_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'auto_summary.py')]
 DB_MAINTENANCE_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'db_maintenance.py')]
 AUTO_TUNER_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'auto_tuner.py')]
+AI_REVIEWER_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'ai_reviewer.py')]
 TELEGRAM_BOT_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'telegram_bot.py')]
 MARKET_BRIEFING_CMD = [PYTHON, str(ROOT / 'trading_bot' / 'tasks' / 'market_briefing.py')]
 AUTO_TRADER_SCRIPT = str(ROOT / 'trading_bot' / 'tasks' / 'auto_trader.py')
@@ -306,6 +307,12 @@ def run_market_briefing() -> None:
     _run_subprocess(MARKET_BRIEFING_CMD, 'market_briefing', timeout_seconds=120)
 
 
+def run_ai_reviewer() -> None:
+    """AI Reviewer: Walk-Forward 파라미터 변경 분석 + 주간 성과 → Claude 브리핑 → Telegram."""
+    _log('[스케줄러] ai_reviewer 실행')
+    _run_subprocess(AI_REVIEWER_CMD, 'ai_reviewer', timeout_seconds=120)
+
+
 # ---------------------------------------------------------------------------
 # Telegram Bot 프로세스
 # ---------------------------------------------------------------------------
@@ -394,6 +401,10 @@ _log('DB 하우스키핑 스케줄 등록 (매일 03:00)')
 # Walk-Forward 튜닝: 매주 일요일 04:00
 sched.add_job(run_auto_tuner, 'cron', hour=4, minute=0, day_of_week='sun', id='auto_tuner')
 _log('Walk-Forward 튜너 스케줄 등록 (매주 일요일 04:00)')
+
+# AI Reviewer: 매주 일요일 04:30 (auto_tuner 완료 후 30분 여유)
+sched.add_job(run_ai_reviewer, 'cron', hour=4, minute=30, day_of_week='sun', id='ai_reviewer')
+_log('AI Reviewer 스케줄 등록 (매주 일요일 04:30)')
 
 # Market Briefing: 09:00 (업비트 일일 리셋) + 4시간마다 (00, 04, 08, 12, 16, 20)
 sched.add_job(
