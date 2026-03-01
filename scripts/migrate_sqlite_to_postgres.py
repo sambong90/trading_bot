@@ -66,25 +66,43 @@ def make_aware(dt):
     return dt
 
 
+def _clean_nan(obj):
+    """dict/list 내부의 float NaN/Inf를 재귀적으로 None으로 교체.
+
+    PostgreSQL JSON은 RFC 7159를 엄격히 따르므로 NaN/Infinity 불허.
+    Python의 json.loads는 NaN을 허용하지만 PostgreSQL은 거부함.
+    """
+    import math
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _clean_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_nan(v) for v in obj]
+    return obj
+
+
 def sanitize_json(val):
     """SQLite JSON 컬럼 값을 PostgreSQL JSON 호환 형태로 변환.
 
-    SQLite는 JSON을 TEXT로 저장하므로 검증 없이 아무 문자열이나 들어올 수 있음.
-    - 이미 dict/list이면 그대로 반환
-    - 문자열이면 json.loads 시도 → 실패 시 None 반환
-    - 빈 문자열, 'None', 'null' 등도 None 처리
+    SQLite는 JSON을 TEXT로 저장하므로 검증 없이 아무 값이나 들어올 수 있음.
+    - 이미 dict/list이면 NaN 정제 후 반환 (SQLAlchemy가 이미 파싱한 경우)
+    - 문자열이면 json.loads 후 NaN 정제 → 실패 시 None 반환
+    - 빈 문자열, 'None', 'null' 등은 None 처리
     """
     import json
     if val is None:
         return None
     if isinstance(val, (dict, list)):
-        return val
+        # SQLAlchemy가 이미 파싱했지만 NaN float이 남아있을 수 있음
+        return _clean_nan(val)
     if isinstance(val, str):
         stripped = val.strip()
         if stripped in ('', 'None', 'null', 'NULL'):
             return None
         try:
-            return json.loads(stripped)
+            # Python json.loads는 NaN 허용 → 파싱 후 반드시 _clean_nan 적용
+            return _clean_nan(json.loads(stripped))
         except (json.JSONDecodeError, ValueError):
             logger.warning('    JSON 파싱 실패, NULL로 대체: %.80r', stripped)
             return None

@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: quant-bot
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      # ── 보안 컨텍스트 ────────────────────────────────────────────────────
+      # postgres 공식 이미지는 uid=999(postgres)로 실행됨.
+      securityContext:
+        fsGroup: 999
+
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+
+          # ── 환경 변수: Secret에서 주입 ─────────────────────────────────
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+            # PGDATA: 볼륨 루트가 아닌 하위 디렉터리 사용 (lost+found 충돌 방지)
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          # ── 볼륨 마운트 ──────────────────────────────────────────────────
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+
+          # ── 리소스 ───────────────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # ── Readiness Probe ───────────────────────────────────────────────
+          # sh -c 로 감싸야 $POSTGRES_USER 환경변수가 실제로 치환됨.
+          # exec 배열에서 $(VAR) 구문은 probe에서 치환되지 않으므로 shell 사용.
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          # ── Liveness Probe ────────────────────────────────────────────────
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+  # ── PVC 자동 생성 (StatefulSet volumeClaimTemplates) ────────────────────
+  # StatefulSet이 관리하는 PVC → 파드 삭제 후에도 데이터 보존.
+  # 수동 삭제: kubectl delete pvc postgres-data-postgres-0 -n quant-bot
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+        namespace: quant-bot
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 4Gi
+        # OrbStack 로컬: storageClassName 생략 시 default 사용
+        # AWS EKS:       storageClassName: gp3
+        # GKE:           storageClassName: standard-rwo
+        # storageClassName: standard

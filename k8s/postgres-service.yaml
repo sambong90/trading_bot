@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: quant-bot
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  # ClusterIP: 네임스페이스 내부에서만 접근 가능 (외부 노출 없음)
+  # trading-bot은 "postgres:5432" 또는
+  # "postgres.quant-bot.svc.cluster.local:5432" 로 연결
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

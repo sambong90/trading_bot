@@ -18,8 +18,9 @@ data:
   # /panic 명령 또는 Flask /panic 엔드포인트로 "0"으로 설정됨
   ENABLE_AUTO_LIVE: "0"
 
-  # ── DB 경로 (컨테이너 내 절대 경로, PVC 마운트 위치와 일치) ───────────────
-  DB_URL: "sqlite:////app/trading_bot/db/trading_bot.db"
+  # ── DB 연결 ──────────────────────────────────────────────────────────────
+  # DB_URL은 패스워드 포함으로 trading-bot-secret에서 주입됨 (deployment.yaml 참조).
+  # 로컬 개발 시 .env 파일에 DB_URL=postgresql://... 또는 sqlite:///... 설정.
 
   # ── 스케줄러 ─────────────────────────────────────────────────────────────
   # 1h봉 마감 후 N초 대기 후 실행 (기본 60초 = HH:01:00)

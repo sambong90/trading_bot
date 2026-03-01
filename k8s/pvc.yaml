@@ -6,18 +6,15 @@ metadata:
   labels:
     app.kubernetes.io/name: trading-bot
 spec:
-  # ── ReadWriteOnce: SQLite에 필수 ───────────────────────────────────────
-  # SQLite는 단일 파일 DB로, 동시에 여러 프로세스/파드가 쓰면 DB 잠금 및 손상이 발생함.
-  # ReadWriteOnce(RWO)는 하나의 노드에서만 마운트를 허용하여 이 위험을 차단함.
-  # deployment.yaml의 strategy: Recreate 와 함께 사용하면 이전 파드가 완전히
-  # 종료된 후에야 새 파드가 볼륨을 획득하므로 DB 동시 접근이 원천 방지됨.
+  # ── ReadWriteOnce: 로그·pid·heartbeat 파일 보관용 ──────────────────────
+  # DB는 PostgreSQL(postgres-statefulset.yaml의 별도 PVC)로 이관됨.
+  # 이 PVC는 trading_bot/logs/ 디렉터리(로그·heartbeat.json·pid 등)를 위해 유지.
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      # 기본 4Gi: SQLite DB(~수백 MB) + 로그 파일 여유 포함.
-      # 장기 운영 시 db_maintenance 작업이 오래된 데이터를 정리하므로 큰 용량은 불필요.
-      storage: 4Gi
+      # 로그 파일 전용 — SQLite DB 제거 후 1Gi면 충분.
+      storage: 1Gi
   # ── StorageClass ────────────────────────────────────────────────────────
   # 주석 해제하여 클러스터에 맞는 StorageClass를 지정하세요:
   #

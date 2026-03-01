@@ -7,13 +7,12 @@ metadata:
     app.kubernetes.io/name: trading-bot
     app.kubernetes.io/component: scheduler
 spec:
-  replicas: 1  # SQLite를 사용하는 한 반드시 1로 유지. 2 이상이면 DB 잠금 손상 발생.
+  replicas: 1  # 트레이딩 봇은 단일 인스턴스 유지 (중복 매수·매도 방지)
 
-  # ── ⚠️ Recreate 전략: SQLite DB 보호의 핵심 ─────────────────────────────
-  # RollingUpdate는 구 파드와 신 파드가 동시에 실행되는 순간이 존재함.
-  # 두 파드가 같은 PVC(RWO) 위의 SQLite 파일에 동시 쓰기 시 "database is locked"
-  # 오류 또는 DB 파일 손상이 발생할 수 있음.
-  # Recreate: 구 파드를 완전히 종료(Terminated) → PVC 해제 → 신 파드 기동 순서 보장.
+  # ── Recreate 전략 ──────────────────────────────────────────────────────
+  # DB가 PostgreSQL로 이관되어 동시 쓰기 잠금 문제는 해소됨.
+  # 그러나 단일 replicas=1 봇에서 두 인스턴스가 동시에 매매하면 중복 주문 위험이 있으므로
+  # Recreate(구 파드 완전 종료 → 신 파드 기동) 전략을 유지.
   strategy:
     type: Recreate
 
@@ -41,28 +40,49 @@ spec:
       securityContext:
         runAsNonRoot: true        # Dockerfile의 USER botuser 와 일치
         fsGroup: 1000             # PVC 볼륨 파일 소유권을 botuser 그룹으로 설정
-                                  # (DB·로그 파일에 쓰기 권한 보장)
 
-      # ── Init Container: DB 디렉터리 권한 초기화 ───────────────────────────
-      # PVC가 처음 마운트될 때 소유권을 botuser(uid=999)로 설정.
-      # 첫 배포 시 DB 디렉터리가 root 소유로 생성되어 봇이 쓰지 못하는 문제 예방.
       initContainers:
-        - name: init-permissions
-          image: busybox:1.36
-          securityContext:
-            runAsUser: 0           # 권한 변경을 위해 일시적으로 root 사용
+        # ── Init 1: PostgreSQL 준비 대기 ─────────────────────────────────
+        # trading-bot이 DB에 연결 시도하기 전에 postgres 파드가 준비될 때까지 대기.
+        # postgres:16-alpine 이미지의 pg_isready 를 사용.
+        - name: wait-for-postgres
+          image: postgres:16-alpine
           command:
             - sh
             - -c
             - |
-              mkdir -p /app/trading_bot/db /app/trading_bot/logs
-              chown -R 999:1000 /app/trading_bot/db /app/trading_bot/logs
-              chmod 755 /app/trading_bot/db /app/trading_bot/logs
-              echo "Init: DB/logs directory permissions set."
+              until pg_isready -h postgres -p 5432 -U $(POSTGRES_USER); do
+                echo "PostgreSQL not ready yet, waiting..."
+                sleep 3
+              done
+              echo "PostgreSQL is ready."
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+
+        # ── Init 2: logs 디렉터리 권한 초기화 ──────────────────────────
+        # PVC가 처음 마운트될 때 소유권을 botuser(uid=999)로 설정.
+        # 첫 배포 시 logs 디렉터리가 root 소유로 생성되어 봇이 쓰지 못하는 문제 예방.
+        - name: init-permissions
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0           # 권한 변경을 위해 일시적으로 root 사용
+            runAsNonRoot: false    # Pod-level runAsNonRoot: true 를 init에서만 명시적 오버라이드
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /app/trading_bot/logs
+              chown -R 999:1000 /app/trading_bot/logs
+              chmod 755 /app/trading_bot/logs
+              echo "Init: logs directory permissions set."
           volumeMounts:
-            - name: bot-data
-              mountPath: /app/trading_bot/db
-              subPath: db
             - name: bot-data
               mountPath: /app/trading_bot/logs
               subPath: logs
@@ -70,9 +90,8 @@ spec:
       containers:
         - name: trading-bot
           # ── 이미지 ─────────────────────────────────────────────────────────
-          # YOUR_GITHUB_USERNAME 을 실제 GitHub 계정명 또는 조직명으로 교체하세요.
           # GitHub Actions CI/CD가 latest 태그를 자동 갱신함.
-          image: ghcr.io/YOUR_GITHUB_USERNAME/trading_bot:latest
+          image: ghcr.io/sambong90/trading_bot:latest
 
           # Always: CI/CD에서 latest를 계속 덮어쓰므로 항상 최신 이미지 pull
           imagePullPolicy: Always
@@ -88,12 +107,12 @@ spec:
               drop:
                 - ALL
 
-          # ── 환경 변수: ConfigMap (비민감 설정) ────────────────────────────
+          # ── 환경 변수: ConfigMap (비민감 설정) ────────────────────────
           envFrom:
             - configMapRef:
                 name: trading-bot-config
 
-          # ── 환경 변수: Secret (민감 정보) ─────────────────────────────────
+          # ── 환경 변수: Secret (민감 정보) ─────────────────────────────
           env:
             - name: UPBIT_ACCESS_KEY
               valueFrom:
@@ -120,26 +139,26 @@ spec:
                 secretKeyRef:
                   name: trading-bot-secret
                   key: TELEGRAM_ADMIN_USER_ID
+            # DB_URL: 패스워드 포함 → Secret에서 주입 (ConfigMap 오버라이드)
+            - name: DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: trading-bot-secret
+                  key: DB_URL
 
-          # ── 볼륨 마운트: 단일 PVC, 두 개의 subPath ────────────────────────
-          # db/ 와 logs/ 를 하나의 PVC 안에서 분리하여 관리.
-          # subPath를 쓰면 PVC 루트를 오염시키지 않고 깔끔하게 격리됨.
+          # ── 볼륨 마운트: 로그 전용 PVC ────────────────────────────────
+          # DB는 PostgreSQL(별도 StatefulSet PVC)로 이관됨.
+          # 이 PVC는 logs/ (heartbeat.json, pid, 로그파일) 전용.
           volumeMounts:
-            - name: bot-data
-              mountPath: /app/trading_bot/db     # SQLite DB 파일 위치
-              subPath: db
             - name: bot-data
               mountPath: /app/trading_bot/logs   # 로그·PID·heartbeat 파일
               subPath: logs
 
           # ── 리소스 요청/제한 ───────────────────────────────────────────────
-          # 60개 티커 분석 + pandas/numpy 연산 기준 실측값.
-          # OrbStack 로컬: limits를 높게 설정해도 실제 사용량이 낮으면 문제없음.
-          # 클라우드(t3.small 1vCPU/2GB 등): requests 를 노드 용량의 70% 이내로 유지.
           resources:
             requests:
               cpu: 200m        # 0.2 vCPU — 대기 중 idle 상태 기준
-              memory: 512Mi    # pandas DataFrame + SQLite 캐시 포함
+              memory: 512Mi    # pandas DataFrame + PostgreSQL 커넥션 풀 포함
             limits:
               cpu: 1000m       # 1 vCPU — 매매 사이클 피크 연산 시 burst 허용
               memory: 1Gi      # 60개 티커 동시 분석 시 최대 사용량
@@ -182,7 +201,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 30      # 최대 5분 대기
 
-      # ── 볼륨: PVC 연결 ───────────────────────────────────────────────────
+      # ── 볼륨: PVC 연결 (로그 전용) ──────────────────────────────────────
       volumes:
         - name: bot-data
           persistentVolumeClaim:
@@ -190,5 +209,4 @@ spec:
 
       # ── 종료 유예 시간 ────────────────────────────────────────────────────
       # scheduler_service.py 의 graceful_shutdown 이 15초 이내에 완료됨.
-      # 여유있게 30초로 설정 (기본값 30초와 동일하나 명시적으로 문서화).
       terminationGracePeriodSeconds: 30

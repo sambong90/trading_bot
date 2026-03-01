@@ -291,7 +291,7 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
         except Exception:
             pass
     update_phase('A - 데이터 수집', status='done', percent=100, recent_actions=[f'fetch complete rows={len(df)}'])
-    # write to DB (upsert-like: try insert, ignore on conflict for sqlite simple approach)
+    # write to DB (dialect-aware upsert: skip on conflict)
     session = None
     conn = None
     try:
@@ -324,6 +324,29 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
             finally:
                 conn.close()
                 conn = None
+        elif dialect == 'postgresql':
+            # PostgreSQL: 단일 배치 INSERT ON CONFLICT DO NOTHING — 행 단위 flush 불필요
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            records = [
+                {
+                    'ticker': ticker,
+                    'timeframe': interval,
+                    'ts': row['time'].to_pydatetime(),
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']),
+                    'source': 'upbit',
+                }
+                for _, row in df.iterrows()
+            ]
+            if records:
+                stmt = pg_insert(OHLCV).values(records).on_conflict_do_nothing(
+                    index_elements=['ticker', 'timeframe', 'ts']
+                )
+                session.execute(stmt)
+                session.commit()
         else:
             from sqlalchemy.exc import IntegrityError
             for _, row in df.iterrows():
