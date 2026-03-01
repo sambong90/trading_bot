@@ -329,10 +329,33 @@ def generate_comprehensive_signal_with_logging(
                 f"상위 현재가({mtf_info['current_price']:.0f}) < EMA{_ema_period}({mtf_info['ema_long']:.0f})"
             )
 
-        # ATR Trailing Stop (Chandelier Exit): recent highest high - 2.5*ATR
+        # ATR Trailing Stop (Chandelier Exit): recent highest high - ATR*mult
+        # 포지션 진입 이후 봉만 기준 — 진입 전 고가를 포함하면 스탑 라인이 실제보다 낮아져 허위 신호 발생
+        _entry_ts = None
+        if position_qty > 0 and avg_buy_price > 0:
+            try:
+                from trading_bot.balanced_plus import last_buy_ts as _lbt
+                _raw_ets = _lbt(ticker)
+                if _raw_ets is not None:
+                    _ets_pd = pd.Timestamp(_raw_ets)
+                    # tz-aware → UTC naive, tz-naive → 그대로(UTC로 간주)
+                    if _ets_pd.tz is not None:
+                        _entry_ts = _ets_pd.tz_convert('UTC').tz_localize(None)
+                    else:
+                        _entry_ts = _ets_pd
+            except Exception:
+                pass
         df_ohlcv_20 = load_ohlcv_from_db(ticker, timeframe, count=20)
         try:
-            recent_highest = float(df_ohlcv_20['high'].max()) if df_ohlcv_20 is not None and not df_ohlcv_20.empty and 'high' in df_ohlcv_20.columns else None
+            if (_entry_ts is not None and df_ohlcv_20 is not None
+                    and not df_ohlcv_20.empty and 'high' in df_ohlcv_20.columns):
+                _col_times = pd.to_datetime(df_ohlcv_20['time'])
+                if _col_times.dt.tz is not None:
+                    _col_times = _col_times.dt.tz_convert('UTC').dt.tz_localize(None)
+                _df_since = df_ohlcv_20[_col_times >= _entry_ts]
+                recent_highest = float(_df_since['high'].max()) if not _df_since.empty else float(df_ohlcv_20['high'].max())
+            else:
+                recent_highest = float(df_ohlcv_20['high'].max()) if df_ohlcv_20 is not None and not df_ohlcv_20.empty and 'high' in df_ohlcv_20.columns else None
             if recent_highest is not None and (pd.isna(recent_highest) or recent_highest <= 0):
                 recent_highest = None
         except (TypeError, ValueError, KeyError):
@@ -613,6 +636,13 @@ def generate_comprehensive_signal_with_logging(
         ts_now = closed_candle['time']
         if hasattr(ts_now, 'to_pydatetime'):
             ts_now = ts_now.to_pydatetime()
+        # DB 저장 UTC 정규화: tz-aware (KST 등) → naive UTC, balanced_plus.py와 타임존 일치
+        try:
+            from datetime import timezone as _tz
+            if hasattr(ts_now, 'tzinfo') and ts_now.tzinfo is not None:
+                ts_now = ts_now.astimezone(_tz.utc).replace(tzinfo=None)
+        except Exception:
+            pass
         bucket_seconds = _candle_bucket_seconds(timeframe)
         session = get_session()
         try:

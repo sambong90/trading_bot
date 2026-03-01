@@ -4,7 +4,7 @@ State is tracked via analysis_results.decision_reason tags (no schema change).
 All helpers defensive: on DB error return safe default (no cooldown), never crash.
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # ----- Env-overridable constants (no code edit needed to tune) -----
@@ -94,7 +94,7 @@ def count_tag_last_24h(ticker: str, tag: str) -> int:
     try:
         from trading_bot.db import get_session
         from trading_bot.models import AnalysisResult
-        since = datetime.utcnow() - timedelta(hours=24)
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
         session = get_session()
         try:
             rows = session.query(AnalysisResult).filter(
@@ -138,7 +138,7 @@ def is_in_buy_cooldown(ticker: str) -> bool:
             t = ts.timestamp()
         else:
             t = (ts - datetime(1970, 1, 1)).total_seconds()
-        return (datetime.utcnow().timestamp() - t) < (BUY_COOLDOWN_MINUTES * 60)
+        return (datetime.now(timezone.utc).timestamp() - t) < (BUY_COOLDOWN_MINUTES * 60)
     except Exception:
         return False
 
@@ -153,7 +153,7 @@ def is_in_dca_cooldown(ticker: str) -> bool:
             t = ts.timestamp()
         else:
             t = (ts - datetime(1970, 1, 1)).total_seconds()
-        return (datetime.utcnow().timestamp() - t) < (DCA_COOLDOWN_MINUTES * 60)
+        return (datetime.now(timezone.utc).timestamp() - t) < (DCA_COOLDOWN_MINUTES * 60)
     except Exception:
         return False
 
@@ -178,7 +178,7 @@ def is_in_partial_stop_cooldown(ticker: str) -> bool:
             t = ts.timestamp()
         else:
             t = (ts - datetime(1970, 1, 1)).total_seconds()
-        return (datetime.utcnow().timestamp() - t) < (PARTIAL_STOP_COOLDOWN_MINUTES * 60)
+        return (datetime.now(timezone.utc).timestamp() - t) < (PARTIAL_STOP_COOLDOWN_MINUTES * 60)
     except Exception:
         return False
 
@@ -196,8 +196,12 @@ def count_open_positions(executor, tickers: list) -> int:
         return 0
 
 
-def log_execution_event(ticker: str, signal: str, tag: str, price: float = None):
-    """Best-effort insert AnalysisResult row for executed action (EXEC_BUY/EXEC_SELL/DCA_BUY/PS1/PS2). Never crash."""
+def log_execution_event(ticker: str, signal: str, tag: str, price: float = None) -> bool:
+    """실행 이벤트(EXEC_BUY/EXEC_SELL/DCA_BUY/PS1/PS2)를 AnalysisResult에 기록.
+    성공 시 True, 실패 시 False 반환 (절대 예외 미발생).
+    주의: False 반환 시 쿨다운 태그가 DB에 없어 다음 사이클에서 중복 실행될 수 있음."""
+    import logging
+    _logger = logging.getLogger(__name__)
     try:
         from trading_bot.db import get_session
         from trading_bot.models import AnalysisResult
@@ -205,7 +209,7 @@ def log_execution_event(ticker: str, signal: str, tag: str, price: float = None)
         try:
             rec = AnalysisResult(
                 ticker=ticker,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 signal=signal,
                 price=price,
                 decision_reason=tag,
@@ -214,9 +218,19 @@ def log_execution_event(ticker: str, signal: str, tag: str, price: float = None)
             )
             session.add(rec)
             session.commit()
-        except Exception:
+            return True
+        except Exception as e:
             session.rollback()
+            _logger.error(
+                '[log_execution_event] DB 커밋 실패 (%s/%s): %s — 쿨다운 태그 미기록, 다음 사이클 중복 실행 위험',
+                ticker, tag, e,
+            )
+            return False
         finally:
             session.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.error(
+            '[log_execution_event] 세션 획득 실패 (%s/%s): %s — 쿨다운 태그 미기록',
+            ticker, tag, e,
+        )
+        return False

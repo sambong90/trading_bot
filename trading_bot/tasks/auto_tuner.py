@@ -198,6 +198,17 @@ def main():
     finally:
         session.close()
 
+    # ── AI Reviewer 순차 실행: 튜닝 완료 직후 브리핑 생성 ──────────────────
+    # 독립 cron 대신 여기서 직접 호출하여 레이스 컨디션 완전 제거.
+    # 예외 발생 시 튜닝 결과에 영향 없이 오류만 출력.
+    try:
+        from trading_bot.tasks.ai_reviewer import run_ai_reviewer
+        print('[auto_tuner] AI Reviewer 순차 실행 시작...')
+        run_ai_reviewer()
+        print('[auto_tuner] AI Reviewer 완료')
+    except Exception as e:
+        print(f'[auto_tuner] AI Reviewer 실행 실패 (튜닝 결과에는 영향 없음): {e}')
+
 
 if __name__ == '__main__':
     main()

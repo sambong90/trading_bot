@@ -402,9 +402,8 @@ _log('DB 하우스키핑 스케줄 등록 (매일 03:00)')
 sched.add_job(run_auto_tuner, 'cron', hour=4, minute=0, day_of_week='sun', id='auto_tuner')
 _log('Walk-Forward 튜너 스케줄 등록 (매주 일요일 04:00)')
 
-# AI Reviewer: 매주 일요일 04:30 (auto_tuner 완료 후 30분 여유)
-sched.add_job(run_ai_reviewer, 'cron', hour=4, minute=30, day_of_week='sun', id='ai_reviewer')
-_log('AI Reviewer 스케줄 등록 (매주 일요일 04:30)')
+# AI Reviewer: auto_tuner 완료 후 순차 실행 (auto_tuner.py 내부에서 직접 호출)
+# → 레이스 컨디션 방지를 위해 독립 cron 제거
 
 # Market Briefing: 09:00 (업비트 일일 리셋) + 4시간마다 (00, 04, 08, 12, 16, 20)
 sched.add_job(

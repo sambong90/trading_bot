@@ -316,7 +316,8 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                         executor.place_order('sell', current_price, size_pct=PARTIAL_STOP_2_SELL_PCT, ticker=ticker)
                         logger.info('✅ %s 부분손절 PS2 실행 (ROI %.1f%%, 비중 %.0f%%)', ticker, current_roi, PARTIAL_STOP_2_SELL_PCT * 100)
                         ai_logger.info('[EXECUTE] %s | ACTION:SELL | PS2 | ROI:%.1f%%', ticker, current_roi)
-                        log_execution_event(ticker, 'sell', TAG_PS2, current_price)
+                        if not log_execution_event(ticker, 'sell', TAG_PS2, current_price):
+                            logger.warning('[PS2] %s — 쿨다운 태그 DB 기록 실패: 다음 사이클 중복 실행 위험', ticker)
                         return 'executed', None, None
                     except Exception as e:
                         logger.warning('[오류] %s — PS2 실행 실패: %s', ticker, str(e))
@@ -327,7 +328,8 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                         executor.place_order('sell', current_price, size_pct=PARTIAL_STOP_1_SELL_PCT, ticker=ticker)
                         logger.info('✅ %s 부분손절 PS1 실행 (ROI %.1f%%, 비중 %.0f%%)', ticker, current_roi, PARTIAL_STOP_1_SELL_PCT * 100)
                         ai_logger.info('[EXECUTE] %s | ACTION:SELL | PS1 | ROI:%.1f%%', ticker, current_roi)
-                        log_execution_event(ticker, 'sell', TAG_PS1, current_price)
+                        if not log_execution_event(ticker, 'sell', TAG_PS1, current_price):
+                            logger.warning('[PS1] %s — 쿨다운 태그 DB 기록 실패: 다음 사이클 중복 실행 위험', ticker)
                         return 'executed', None, None
                     except Exception as e:
                         logger.warning('[오류] %s — PS1 실행 실패: %s', ticker, str(e))
@@ -344,7 +346,8 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                         executor.place_order('buy', current_price, size_pct=dca_pct, ticker=ticker)
                         logger.info('✅ %s DCA 매수 실행 (ROI %.1f%%, 비중 %.2f%%)', ticker, current_roi, dca_pct * 100)
                         ai_logger.info('[EXECUTE] %s | ACTION:BUY | DCA_BUY | ROI:%.1f%%', ticker, current_roi)
-                        log_execution_event(ticker, 'buy', TAG_DCA_BUY, current_price)
+                        if not log_execution_event(ticker, 'buy', TAG_DCA_BUY, current_price):
+                            logger.warning('[DCA] %s — 쿨다운 태그 DB 기록 실패: 다음 사이클 중복 실행 위험', ticker)
                         return 'executed', None, None
                     except Exception as e:
                         logger.warning('[오류] %s — DCA 매수 실패: %s', ticker, str(e))

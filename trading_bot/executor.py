@@ -400,12 +400,16 @@ class LiveExecutor:
             raise RuntimeError('ENABLE_AUTO_LIVE=0 - 자동 라이브 거래가 비활성화되어 있습니다. 실제 주문을 실행하지 않습니다.')
 
         # --- 슬리피지 방어: 주문 전 실시간 가격 검증 (BTC 급변 방어) ---
+        # 방향성 슬리피지: 불리한 방향(매수=가격 상승, 매도=가격 하락)만 차단. 유리한 슬리피지는 허용.
         try:
             import pyupbit
             realtime_price = pyupbit.get_current_price(ticker)
             if realtime_price and price and price > 0:
-                slippage = abs(realtime_price - price) / price
-                if slippage > 0.03:  # 3% 이상 괴리 시 주문 거부
+                if side == 'buy':
+                    slippage = (realtime_price - price) / price   # 양수 = 실시간이 더 비쌈 (불리)
+                else:
+                    slippage = (price - realtime_price) / price   # 양수 = 실시간이 더 쌈 (불리)
+                if slippage > 0.03:  # 불리한 방향으로 3% 이상 괴리 시 주문 거부
                     msg = (f'슬리피지 방어: {ticker} 참조가격({price:,.0f}) vs '
                            f'실시간({realtime_price:,.0f}) 괴리 {slippage*100:.1f}% > 3%')
                     _logger.warning('[SLIPPAGE GUARD] %s', msg)
@@ -478,7 +482,11 @@ class LiveExecutor:
                         if asset_bal <= 0:
                             raise ValueError(f'{asset_currency} 잔고가 없습니다.')
 
-                        sell_qty = asset_bal * size_pct if size_pct <= 1 else min(size_pct, asset_bal)
+                        # 전량 매도(size_pct>=1.0) 시 잔고 직접 사용 — float 곱으로 인한 crypto dust 방지
+                        if size_pct >= 1.0:
+                            sell_qty = asset_bal
+                        else:
+                            sell_qty = asset_bal * size_pct
                         if sell_qty <= 0:
                             raise ValueError('매도 수량이 0입니다.')
 
@@ -636,59 +644,61 @@ class LiveExecutor:
         # compute realized P&L for today using orders table (sells add KRW, buys subtract KRW), include fees
         # Note: Trade table is for backtest simulations only; actual live/paper orders are in the Order table
         try:
-            from datetime import datetime, timedelta
+            from datetime import datetime
             from trading_bot.db import get_session
             from trading_bot.models import Order
-            session=get_session()
+            from sqlalchemy import func
+            session = get_session()
             today = datetime.utcnow().date()
             start_dt = datetime(today.year, today.month, today.day)
-            trades = session.query(Order).filter(Order.ts >= start_dt).all()
-            pnl = 0.0
-            fees = 0.0
-            for t in trades:
-                try:
-                    side = (t.side or '').lower()
-                    price = float(t.price or 0)
-                    qty = float(t.qty or 0)
-                    fee = float(t.fee or 0)
-                    if side == 'sell':
-                        pnl += price * qty
-                    elif side == 'buy':
-                        pnl -= price * qty
-                    fees += fee
-                except Exception:
-                    pass
+
+            # func.sum() — 전체 행을 메모리로 가져오지 않고 DB에서 집계
+            sell_sum = session.query(
+                func.sum(Order.price * Order.qty)
+            ).filter(Order.ts >= start_dt, Order.side == 'sell').scalar() or 0.0
+
+            buy_sum = session.query(
+                func.sum(Order.price * Order.qty)
+            ).filter(Order.ts >= start_dt, Order.side == 'buy').scalar() or 0.0
+
+            fee_sum = session.query(
+                func.sum(Order.fee)
+            ).filter(Order.ts >= start_dt).scalar() or 0.0
+
             session.close()
-            net = pnl - fees
+
+            pnl = float(sell_sum) - float(buy_sum)
+            net = pnl - float(fee_sum)
             # include additional planned spend as further loss
             net -= float(additional_spend or 0)
-            # add unrealized P&L: estimate current value of holdings in KRW
+
+            # add unrealized P&L: 보유 자산 현재가 일괄 조회 (배치 API 1회)
             try:
                 import pyupbit
-                balances = self.client.get_balances() if hasattr(self,'client') and self.client else []
-                unreal = 0.0
-                for b in balances:
-                    try:
-                        cur_bal = float(b.get('balance') or 0)
-                        if cur_bal <= 0:
-                            continue
-                        currency = b.get('currency')
-                        if currency == 'KRW':
-                            unreal += cur_bal
-                            continue
-                        market = f'KRW-{currency}'
-                        price = pyupbit.get_current_price(market)
-                        if price is None:
-                            continue
-                        unreal += cur_bal * float(price)
-                    except Exception:
-                        pass
-                # include unrealized current value into net estimate
+                balances = self.client.get_balances() if hasattr(self, 'client') and self.client else []
+                unreal = float(next(
+                    (float(b.get('balance') or 0) for b in balances if b.get('currency') == 'KRW'), 0.0
+                ))
+                non_krw = [(b, f'KRW-{b["currency"]}') for b in balances
+                           if b.get('currency') != 'KRW' and float(b.get('balance') or 0) > 0]
+                if non_krw:
+                    markets = [m for _, m in non_krw]
+                    prices_raw = pyupbit.get_current_price(markets)
+                    if isinstance(prices_raw, dict):
+                        prices = prices_raw
+                    elif isinstance(prices_raw, (int, float)) and len(markets) == 1:
+                        prices = {markets[0]: float(prices_raw)}
+                    else:
+                        prices = {}
+                    for b, market in non_krw:
+                        p = prices.get(market)
+                        if p:
+                            unreal += float(b.get('balance', 0)) * float(p)
                 net += unreal
             except Exception:
                 pass
             # if net loss beyond threshold, return True
-            return net < -float(getattr(self,'MAX_DAILY_LOSS_KRW',50000))
+            return net < -float(getattr(self, 'MAX_DAILY_LOSS_KRW', 50000))
         except Exception:
             return False
 
