@@ -66,14 +66,43 @@ def make_aware(dt):
     return dt
 
 
+def sanitize_json(val):
+    """SQLite JSON 컬럼 값을 PostgreSQL JSON 호환 형태로 변환.
+
+    SQLite는 JSON을 TEXT로 저장하므로 검증 없이 아무 문자열이나 들어올 수 있음.
+    - 이미 dict/list이면 그대로 반환
+    - 문자열이면 json.loads 시도 → 실패 시 None 반환
+    - 빈 문자열, 'None', 'null' 등도 None 처리
+    """
+    import json
+    if val is None:
+        return None
+    if isinstance(val, (dict, list)):
+        return val
+    if isinstance(val, str):
+        stripped = val.strip()
+        if stripped in ('', 'None', 'null', 'NULL'):
+            return None
+        try:
+            return json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            logger.warning('    JSON 파싱 실패, NULL로 대체: %.80r', stripped)
+            return None
+    return val
+
+
 def row_to_dict(table, row):
-    """SQLAlchemy Row → dict 변환. datetime 타임존 보정 적용."""
+    """SQLAlchemy Row → dict 변환. datetime 타임존 보정 및 JSON 컬럼 정제 적용."""
+    from sqlalchemy import JSON, Text
     d = {}
     for col in table.columns:
         val = getattr(row, col.name, None)
         # DateTime 컬럼: naive → aware 변환
         if val is not None and hasattr(val, 'tzinfo'):
             val = make_aware(val)
+        # JSON 컬럼: 유효하지 않은 값 정제
+        elif isinstance(col.type, JSON):
+            val = sanitize_json(val)
         d[col.name] = val
     return d
 
