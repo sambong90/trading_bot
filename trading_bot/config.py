@@ -39,3 +39,8 @@ TELEGRAM_ADMIN_USER_ID = os.environ.get('TELEGRAM_ADMIN_USER_ID', '')
 
 # 스케줄러 캔들 마감 동기화 오프셋 (정시 후 N초에 실행, 기본 60초 = HH:01:00)
 CANDLE_SYNC_OFFSET_SEC = int(os.environ.get('CANDLE_SYNC_OFFSET_SEC', '60'))
+
+# 거시 트렌드 필터(Macro EMA) 일봉 기간.
+# auto_tuner가 [5, 20, 30, 50, 100] 중 최적값을 TuningRun에 저장 → param_manager가 읽음.
+# 튜닝 데이터가 없을 때의 최종 fallback.
+MACRO_EMA_LONG = int(os.getenv('MACRO_EMA_LONG', 50))

@@ -154,6 +154,7 @@ def generate_comprehensive_signal_with_logging(
     current_roi: float = 0.0,
     scale_out_stage: int = 0,
     avg_buy_price: float = 0.0,  # [NEW] ATR Scale-Out 기준 계산용
+    macro_ema_long: int = 50,    # [NEW] 거시 트렌드 필터 일봉 EMA 기간 (auto_tuner가 최적화)
 ) -> Dict:
     """
     종합 신호 판단 및 상세 로깅
@@ -315,12 +316,18 @@ def generate_comprehensive_signal_with_logging(
         obv = float(closed_candle.get('obv', 0) or 0)
         obv_sma = float(closed_candle.get('obv_sma', 0) or 0)
         
-        mtf_info = load_higher_timeframe_indicators(ticker, timeframe, count=50, current_price=current_price)
+        mtf_info = load_higher_timeframe_indicators(
+            ticker, timeframe, count=max(50, macro_ema_long + 10),
+            current_price=current_price, macro_ema_long=macro_ema_long,
+        )
         mtf_blocked = False
         if mtf_info and mtf_info.get('is_uptrend') is False:
             mtf_blocked = True
+            _ema_period = mtf_info.get('ema_period', macro_ema_long)
             decision_reason_parts.append(f"상위 타임프레임({mtf_info['timeframe']}) 하락장으로 매수 보류")
-            decision_reason_parts.append(f"상위 현재가({mtf_info['current_price']:.0f}) < EMA50({mtf_info['ema_long']:.0f})")
+            decision_reason_parts.append(
+                f"상위 현재가({mtf_info['current_price']:.0f}) < EMA{_ema_period}({mtf_info['ema_long']:.0f})"
+            )
 
         # ATR Trailing Stop (Chandelier Exit): recent highest high - 2.5*ATR
         df_ohlcv_20 = load_ohlcv_from_db(ticker, timeframe, count=20)

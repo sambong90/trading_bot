@@ -263,6 +263,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     current_roi = ((current_price - avg_buy_price) / avg_buy_price * 100) if (avg_buy_price and float(avg_buy_price) > 0 and current_price is not None) else 0.0
     best_params = get_best_params()
     adx_trend_threshold = float(best_params.get('adx_trend_threshold', 25.0))
+    macro_ema_long = int(best_params.get('macro_ema_long', 50))
 
     try:
         result = generate_comprehensive_signal_with_logging(
@@ -271,12 +272,13 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             current_price=current_price,
             account_value=ACCOUNT_VALUE,
             adx_trend_threshold=adx_trend_threshold,
+            macro_ema_long=macro_ema_long,
             use_dynamic_risk=True,
             is_global_bull_market=is_global_bull_market,
             position_qty=position_qty or 0.0,
             current_roi=current_roi,
             scale_out_stage=scale_out_stage,
-            avg_buy_price=avg_buy_price or 0.0,  # [NEW]
+            avg_buy_price=avg_buy_price or 0.0,
         )
     except Exception as e:
         logger.warning('[오류] %s — 신호 생성 중 예외: %s', ticker, str(e))
@@ -543,7 +545,12 @@ def run_cycle(mode):
             logger.warning('[HARD STOP-LOSS] 체크 중 오류 (계속 진행): %s', e)
 
     # ----- BTC 거시 장세 필터: 1회 조회 후 이번 사이클 매수 허용 여부 결정 -----
-    is_global_bull_market = check_btc_global_trend(interval='day', count=50)
+    from trading_bot.param_manager import get_best_params as _get_best_params_cycle
+    _cycle_params = _get_best_params_cycle()
+    _macro_ema_long = int(_cycle_params.get('macro_ema_long', 50))
+    is_global_bull_market = check_btc_global_trend(
+        interval='day', count=max(50, _macro_ema_long + 10), ema_long=_macro_ema_long
+    )
     if not is_global_bull_market:
         logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
 

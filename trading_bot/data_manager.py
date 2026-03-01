@@ -12,27 +12,36 @@ def load_ohlcv_from_db(ticker, timeframe, count=200):
     return df if df is not None and len(df) > 0 else pd.DataFrame()
 
 
-def load_higher_timeframe_indicators(ticker, timeframe, count=50, current_price=None):
+def load_higher_timeframe_indicators(ticker, timeframe, count=50, current_price=None, macro_ema_long=None):
     """
-    상위 타임프레임(일봉) 지표: EMA 50 대비 현재가로 상승/하락 추세 판단.
-    current_price가 일봉 EMA 50 위면 is_uptrend True, 아래면 False.
+    상위 타임프레임(일봉) 지표: 일봉 EMA 대비 현재가로 상승/하락 추세 판단.
+    macro_ema_long: 일봉 EMA 기간. None이면 config.MACRO_EMA_LONG(기본 50) 사용.
+    current_price가 EMA 위면 is_uptrend True, 아래면 False.
     current_price가 None이거나 데이터 부족 시 None 반환(필터 스킵).
     """
     if current_price is None or current_price <= 0:
         return None
+    if macro_ema_long is None:
+        try:
+            from trading_bot.config import MACRO_EMA_LONG
+            macro_ema_long = MACRO_EMA_LONG
+        except Exception:
+            macro_ema_long = 50
+    macro_ema_long = int(macro_ema_long)
+    min_bars = macro_ema_long + 10  # EMA 워밍업 여유
     try:
         from trading_bot.data import fetch_ohlcv_from_db, fetch_ohlcv
-        df_day = fetch_ohlcv_from_db(ticker=ticker, interval='day', count=max(count, 60))
-        if df_day is None or len(df_day) < 50:
+        df_day = fetch_ohlcv_from_db(ticker=ticker, interval='day', count=max(count, min_bars))
+        if df_day is None or len(df_day) < macro_ema_long:
             from trading_bot.data import fetch_ohlcv as _fetch_ohlcv
-            df_day = _fetch_ohlcv(ticker=ticker, interval='day', count=60, use_db_first=False)
-        if df_day is None or len(df_day) < 50:
+            df_day = _fetch_ohlcv(ticker=ticker, interval='day', count=min_bars, use_db_first=False)
+        if df_day is None or len(df_day) < macro_ema_long:
             return None
         if 'time' not in df_day.columns and df_day.index.name is not None:
             df_day = df_day.reset_index()
         close = df_day['close']
-        ema50 = _ema(close, 50)
-        last_ema = float(ema50.iloc[-1]) if len(ema50) and pd.notna(ema50.iloc[-1]) else None
+        ema_macro = _ema(close, macro_ema_long)
+        last_ema = float(ema_macro.iloc[-1]) if len(ema_macro) and pd.notna(ema_macro.iloc[-1]) else None
         if last_ema is None or last_ema <= 0:
             return None
         is_uptrend = current_price >= last_ema
@@ -41,6 +50,7 @@ def load_higher_timeframe_indicators(ticker, timeframe, count=50, current_price=
             'timeframe': 'day',
             'current_price': float(current_price),
             'ema_long': last_ema,
+            'ema_period': macro_ema_long,  # 실제 사용된 기간 (로그 표시용)
         }
     except Exception:
         return None
