@@ -45,10 +45,13 @@ def _apply_migrations():
         for table, column, col_type in _migrations:
             try:
                 conn.execute(text(f'SELECT {column} FROM {table} LIMIT 1'))
+                conn.rollback()  # 명시적 롤백으로 트랜잭션 정리
             except Exception:
+                conn.rollback()  # PostgreSQL: 실패한 트랜잭션 롤백 필수
                 try:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {col_type}'))
                     conn.commit()
                     _log.info('[DB Migration] Added column %s.%s', table, column)
                 except Exception as e:
+                    conn.rollback()
                     _log.debug('[DB Migration] Skip %s.%s: %s', table, column, e)
