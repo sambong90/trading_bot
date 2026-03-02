@@ -26,6 +26,29 @@ def get_session():
 
 
 def ensure_tables():
-    """Create all tables if they do not exist."""
+    """Create all tables if they do not exist, then apply pending column migrations."""
     from trading_bot.models import Base
     Base.metadata.create_all(bind=engine)
+    _apply_migrations()
+
+
+def _apply_migrations():
+    """Add missing columns to existing tables (create_all won't ALTER TABLE)."""
+    import logging
+    _log = logging.getLogger(__name__)
+    _migrations = [
+        # (table, column, SQL type)
+        ('position_states', 'trailing_high', 'FLOAT DEFAULT 0.0'),
+    ]
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for table, column, col_type in _migrations:
+            try:
+                conn.execute(text(f'SELECT {column} FROM {table} LIMIT 1'))
+            except Exception:
+                try:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {column} {col_type}'))
+                    conn.commit()
+                    _log.info('[DB Migration] Added column %s.%s', table, column)
+                except Exception as e:
+                    _log.debug('[DB Migration] Skip %s.%s: %s', table, column, e)

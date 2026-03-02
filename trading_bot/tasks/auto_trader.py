@@ -186,9 +186,10 @@ def compute_total_account_equity(executor, tickers):
 
 
 def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global_bull_market,
-                           ticker=None, fng_value=50):
+                           ticker=None, fng_value=50):  # fng_value kept for backward compat, unused
     """
-    Regime-Dependent Dynamic Position Sizing (Risk Parity + Volatility Targeting + FNG).
+    Regime-Dependent Dynamic Position Sizing (Risk Parity + Volatility Targeting).
+    FNG 조정은 제거됨 — Panic Dip-Buy는 Pass 2에서 별도 처리.
     반환: (final_buy_krw, risk_pct, sl_distance)
     """
     if current_price is None or current_price <= 0 or total_equity <= 0:
@@ -226,15 +227,9 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
             pass
     base_buy_krw *= vol_scale
 
-    # Fear & Greed Index 조정
-    try:
-        from trading_bot.config import FNG_EXTREME_FEAR, FNG_EXTREME_GREED
-        if fng_value <= FNG_EXTREME_FEAR:
-            base_buy_krw *= 1.2  # 극단적 공포: 20% 증가
-        elif fng_value >= FNG_EXTREME_GREED:
-            base_buy_krw *= 0.5  # 극단적 탐욕: 50% 축소
-    except Exception:
-        pass
+    # Fear & Greed Index: Greed Penalty 제거 (추세추종 전략에서 탐욕장 매수 억제는 역효과)
+    # Extreme Fear 시 Panic Dip-Buy는 strategy.py에서 MTF 바이패스로 처리됨
+    # → auto_trader Pass 2에서 'Panic Dip-Buy' 시그널 감지 시 보수적 사이즈로 오버라이드
 
     max_per_coin = total_equity * MAX_PER_COIN_PCT
     bounded_buy_krw = min(max(base_buy_krw, MIN_ORDER_KRW), max_per_coin)
@@ -249,7 +244,7 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
     return float(final_buy_krw), float(risk_pct), float(sl_distance)
 
 
-def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_market=True):
+def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_market=True, fng_value=50):
     """
     티커 1개 분석 후 신호 처리.
     defer_buy=True(투패스 모드)일 때: sell은 즉시 실행, buy는 실행하지 않고 ('pending_buy', reason, data) 반환.
@@ -304,6 +299,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             current_roi=current_roi,
             scale_out_stage=scale_out_stage,
             avg_buy_price=avg_buy_price or 0.0,
+            fng_value=fng_value,
         )
     except Exception as e:
         logger.warning('[오류] %s — 신호 생성 중 예외: %s', ticker, str(e))
@@ -417,6 +413,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 'size_pct': size_pct,
                 'estimated_spend': estimated_spend,
                 'atr': atr,
+                'reason': reason,
             }
         try:
             executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker)
@@ -662,7 +659,7 @@ def run_cycle(mode):
     try:
         for ticker in tickers:
             try:
-                out = analyze_ticker(ticker, executor, mode, defer_buy=True, is_global_bull_market=is_global_bull_market)
+                out = analyze_ticker(ticker, executor, mode, defer_buy=True, is_global_bull_market=is_global_bull_market, fng_value=fng_value)
                 status = out[0]
                 reason = out[1] if len(out) > 1 else None
                 data = out[2] if len(out) > 2 else None
@@ -752,16 +749,30 @@ def run_cycle(mode):
                 ai_logger.info('[SKIP] %s | REASON:SKIP_BUY_COOLDOWN', ticker)
                 continue
 
-            # Regime-Dependent Dynamic Position Sizing (+ Volatility Targeting + FNG)
-            final_buy_krw, risk_pct, sl_distance = calculate_dynamic_size(
-                total_equity=total_equity,
-                current_price=price,
-                atr=atr,
-                size_pct=size_pct,
-                is_global_bull_market=is_global_bull_market,
-                ticker=ticker,
-                fng_value=fng_value,
-            )
+            # Panic Dip-Buy: 보수적 포지션 사이즈 오버라이드 (falling knife 리스크)
+            is_panic_dip_buy = 'Panic Dip-Buy' in (item.get('reason') or '')
+            if is_panic_dip_buy:
+                try:
+                    from trading_bot.config import PANIC_DIP_BUY_SIZE_PCT
+                    panic_size = PANIC_DIP_BUY_SIZE_PCT
+                except Exception:
+                    panic_size = 0.3
+                final_buy_krw = total_equity * panic_size
+                risk_pct = panic_size
+                sl_distance = (atr * ATR_SL_MULT) if atr and atr > 0 else (price * 0.05)
+                logger.info('[Panic Dip-Buy] %s — 보수적 사이즈 적용 (%.0f%% = %.0f원)', ticker, panic_size * 100, final_buy_krw)
+                ai_logger.info('[PANIC_DIP_BUY] %s | size=%.0f%% | amt=%.0fKRW', ticker, panic_size * 100, final_buy_krw)
+            else:
+                # Regime-Dependent Dynamic Position Sizing (+ Volatility Targeting)
+                final_buy_krw, risk_pct, sl_distance = calculate_dynamic_size(
+                    total_equity=total_equity,
+                    current_price=price,
+                    atr=atr,
+                    size_pct=size_pct,
+                    is_global_bull_market=is_global_bull_market,
+                    ticker=ticker,
+                    fng_value=fng_value,
+                )
             if final_buy_krw <= 0:
                 continue
 

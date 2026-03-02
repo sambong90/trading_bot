@@ -753,6 +753,7 @@ def generate_comprehensive_signal_with_logging(
     scale_out_stage: int = 0,
     avg_buy_price: float = 0.0,
     macro_ema_long: int = 50,
+    fng_value: int = 50,
 ) -> Dict:
     """
     종합 신호 판단 및 상세 로깅
@@ -942,6 +943,35 @@ def generate_comprehensive_signal_with_logging(
                         )
         except Exception:
             pass
+
+        # 6c) Panic Dip-Buy: MTF 하락장 + Extreme Fear + 평균회귀 시그널 → MTF 바이패스
+        if signal == 'hold' and mtf_blocked and position_qty <= 0:
+            try:
+                from trading_bot.config import FNG_EXTREME_FEAR
+                if fng_value <= FNG_EXTREME_FEAR:
+                    # Mean-reversion trigger: RSI <= 30 또는 BB 하단 터치
+                    _rsi_panic = float(rsi) if not pd.isna(rsi) else 50
+                    _bb_low = float(bb_lower or 0)
+                    _price = float(current_price or 0)
+                    panic_trigger = False
+                    panic_reasons = []
+
+                    if _rsi_panic <= 30:
+                        panic_trigger = True
+                        panic_reasons.append(f'RSI({_rsi_panic:.1f}) <= 30')
+                    if _bb_low > 0 and _price > 0 and _price <= _bb_low * 1.01:
+                        panic_trigger = True
+                        panic_reasons.append(f'BB하단 터치 (가격 {_price:.0f} <= BB하단 {_bb_low:.0f})')
+
+                    if panic_trigger:
+                        signal = 'buy'
+                        buy_size_pct = 1.0  # auto_trader에서 PANIC_DIP_BUY_SIZE_PCT로 오버라이드됨
+                        trigger_detail = ' + '.join(panic_reasons)
+                        decision_reason_parts.append(
+                            f'Panic Dip-Buy (MTF Bypassed due to Extreme Fear, FNG={fng_value}): {trigger_detail}'
+                        )
+            except Exception:
+                pass
 
         # RSI overbought sell reinforcement
         if signal == 'sell' and position_qty > 0 and rsi >= RSI_SELL_MIN:

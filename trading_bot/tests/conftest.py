@@ -52,5 +52,6 @@ def _fake_get_session():
 
 _fake_db.get_session = _fake_get_session
 _fake_db.engine = None
+_fake_db.ensure_tables = lambda: None
 
 sys.modules.setdefault('trading_bot.db', _fake_db)

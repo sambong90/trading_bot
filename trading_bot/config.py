@@ -57,7 +57,9 @@ TARGET_VOL_PCT = float(os.environ.get('TARGET_VOL_PCT', '0.02'))
 
 # Fear & Greed Index 임계값
 FNG_EXTREME_FEAR = int(os.environ.get('FNG_EXTREME_FEAR', '20'))
-FNG_EXTREME_GREED = int(os.environ.get('FNG_EXTREME_GREED', '80'))
+
+# Panic Dip-Buy 포지션 비중 (MTF 하락장 + Extreme Fear 시 보수적 매수)
+PANIC_DIP_BUY_SIZE_PCT = float(os.environ.get('PANIC_DIP_BUY_SIZE_PCT', '0.3'))
 
 # Multi-TF 4h Confluence 활성화
 MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true', 'yes')

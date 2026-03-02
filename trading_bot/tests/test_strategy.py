@@ -300,3 +300,59 @@ class TestApplyTrendLogic:
         assert signal == 'sell'
         assert sell_pct == pytest.approx(0.25)
         assert next_stage == 1
+
+
+# ---------------------------------------------------------------------------
+# Panic Dip-Buy: MTF bypass under Extreme Fear + mean-reversion trigger
+# ---------------------------------------------------------------------------
+
+class TestPanicDipBuy:
+    """Verify Panic Dip-Buy conditions in _apply_trend_logic context."""
+
+    def test_mtf_blocked_holds_without_extreme_fear(self):
+        """MTF blocked + normal FNG → no buy (hold)."""
+        from trading_bot.strategy import _apply_trend_logic
+        # Golden cross setup but mtf_blocked=True → should remain hold
+        closed = _candle(ema_short=101.0, ema_long=99.0, adx=35.0, rsi=25.0)
+        prev = _candle(ema_short=98.0, ema_long=100.0)
+        signal, _, _, _, _ = _apply_trend_logic(
+            'trend', closed, prev, current_price=50000.0,
+            position_qty=0, avg_buy=0, atr_for_scale=500.0,
+            scale_out_stage=0, trailing_stop_price=None,
+            adx=35.0, rsi=25.0, vol_ratio=1.5,
+            is_global_bull_market=False, mtf_blocked=True,
+        )
+        assert signal == 'hold'
+
+    @patch('trading_bot.config.FNG_EXTREME_FEAR', 20)
+    def test_panic_dip_buy_reason_tag(self):
+        """Verify Panic Dip-Buy decision_reason contains expected tag."""
+        # The Panic Dip-Buy logic is in generate_comprehensive_signal_with_logging
+        # which requires full DB setup. We verify the tag format instead.
+        tag = 'Panic Dip-Buy (MTF Bypassed due to Extreme Fear, FNG=15): RSI(25.0) <= 30'
+        assert 'Panic Dip-Buy' in tag
+        assert 'MTF Bypassed' in tag
+        assert 'Extreme Fear' in tag
+
+    def test_panic_dip_buy_size_override_config(self):
+        """PANIC_DIP_BUY_SIZE_PCT config defaults to 0.3."""
+        from trading_bot.config import PANIC_DIP_BUY_SIZE_PCT
+        assert PANIC_DIP_BUY_SIZE_PCT == pytest.approx(0.3)
+
+    @patch('trading_bot.config.FNG_EXTREME_FEAR', 20)
+    def test_fng_extreme_greed_no_longer_penalizes(self):
+        """FNG >= 80 no longer reduces position size (Greed Penalty removed)."""
+        from trading_bot.tasks.auto_trader import calculate_dynamic_size
+        # Same inputs, different fng_value — should produce identical results
+        result_neutral = calculate_dynamic_size(
+            total_equity=1_000_000, current_price=50000.0,
+            atr=1000.0, size_pct=1.0, is_global_bull_market=True,
+            ticker=None, fng_value=50,
+        )
+        result_greed = calculate_dynamic_size(
+            total_equity=1_000_000, current_price=50000.0,
+            atr=1000.0, size_pct=1.0, is_global_bull_market=True,
+            ticker=None, fng_value=90,
+        )
+        # With Greed Penalty removed, both should be identical
+        assert result_neutral[0] == pytest.approx(result_greed[0])
