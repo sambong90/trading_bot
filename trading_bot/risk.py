@@ -102,3 +102,66 @@ def calculate_adjusted_position_size(
         'atr_trailing_multiplier': 2.0,
     }
     return adjusted, risk_adjustments
+
+
+def check_circuit_breaker(current_equity, peak_equity, daily_start_equity):
+    """Drawdown Circuit Breaker: 일간/전체 DD 임계값 초과 시 발동.
+
+    Returns:
+        (triggered: bool, reason: str, daily_dd_pct: float, total_dd_pct: float)
+    """
+    from trading_bot.config import DD_DAILY_LIMIT_PCT, DD_TOTAL_LIMIT_PCT
+
+    daily_dd_pct = 0.0
+    total_dd_pct = 0.0
+
+    if daily_start_equity and daily_start_equity > 0:
+        daily_dd_pct = (daily_start_equity - current_equity) / daily_start_equity * 100
+    if peak_equity and peak_equity > 0:
+        total_dd_pct = (peak_equity - current_equity) / peak_equity * 100
+
+    if daily_dd_pct >= DD_DAILY_LIMIT_PCT:
+        return (True, f'일간 DD {daily_dd_pct:.1f}% >= 임계값 {DD_DAILY_LIMIT_PCT}%',
+                daily_dd_pct, total_dd_pct)
+    if total_dd_pct >= DD_TOTAL_LIMIT_PCT:
+        return (True, f'전체 DD {total_dd_pct:.1f}% >= 임계값 {DD_TOTAL_LIMIT_PCT}%',
+                daily_dd_pct, total_dd_pct)
+    return (False, '', daily_dd_pct, total_dd_pct)
+
+
+def get_system_state(key, default=None):
+    """system_state 테이블에서 key 값 조회. 실패 시 default 반환."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import SystemState
+        session = get_session()
+        try:
+            row = session.query(SystemState).filter(SystemState.key == key).first()
+            return row.value if row else default
+        finally:
+            session.close()
+    except Exception:
+        return default
+
+
+def set_system_state(key, value):
+    """system_state 테이블에 key=value upsert. 실패 시 False 반환."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import SystemState
+        session = get_session()
+        try:
+            row = session.query(SystemState).filter(SystemState.key == key).first()
+            if row:
+                row.value = str(value)
+            else:
+                session.add(SystemState(key=key, value=str(value)))
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            return False
+        finally:
+            session.close()
+    except Exception:
+        return False

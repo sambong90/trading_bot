@@ -170,12 +170,13 @@ class TuningRun(Base):
 
 
 class PositionState(Base):
-    """Scale-out stage and avg buy price per ticker. Used for 25-25-50 partial sell state."""
+    """Scale-out stage, avg buy price, and trailing high per ticker."""
     __tablename__ = 'position_states'
     id = Column(Integer, primary_key=True, index=True)
     ticker = Column(String, unique=True, index=True, nullable=False)
     stage = Column(Integer, default=0)
     avg_buy_price = Column(Float, default=0.0)
+    trailing_high = Column(Float, default=0.0)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

@@ -13,6 +13,59 @@ def load_ohlcv_from_db(ticker, timeframe, count=200):
     return df if df is not None and len(df) > 0 else pd.DataFrame()
 
 
+def compute_realized_vol(ticker, timeframe='minute60', window=20):
+    """최근 window 봉의 로그 수익률 표준편차를 연율화하여 반환.
+
+    Returns:
+        float — 연율화 변동성 (예: 0.50 = 50%). 실패 시 0.0.
+    """
+    try:
+        df = load_ohlcv_from_db(ticker, timeframe, count=window + 5)
+        if df is None or len(df) < window:
+            return 0.0
+        close = df['close'].dropna()
+        if len(close) < window:
+            return 0.0
+        log_returns = np.log(close / close.shift(1)).dropna()
+        if len(log_returns) < 2:
+            return 0.0
+        std = float(log_returns.tail(window).std())
+        # 1h 봉 → 연율화: √(365 × 24)
+        if 'minute60' in str(timeframe) or '60' in str(timeframe):
+            annualize = np.sqrt(365 * 24)
+        elif 'day' in str(timeframe):
+            annualize = np.sqrt(365)
+        else:
+            annualize = np.sqrt(365 * 24)
+        return float(std * annualize)
+    except Exception:
+        return 0.0
+
+
+def load_4h_ema_state(ticker, ema_short_period=12, ema_long_period=26):
+    """4h OHLCV 로드 → EMA 계산 → 골든/데드크로스 상태 반환.
+
+    Returns:
+        (is_golden_cross: bool, ema_short_val: float, ema_long_val: float) or None on failure.
+    결과는 사이클 내 중복 호출 방지를 위해 호출자에서 캐시.
+    """
+    try:
+        from trading_bot.data import fetch_ohlcv
+        df = fetch_ohlcv(ticker=ticker, interval='minute240', count=100, use_db_first=True)
+        if df is None or len(df) < ema_long_period + 5:
+            return None
+        close = df['close']
+        ema_s = _ema(close, ema_short_period)
+        ema_l = _ema(close, ema_long_period)
+        last_s = float(ema_s.iloc[-1])
+        last_l = float(ema_l.iloc[-1])
+        if pd.isna(last_s) or pd.isna(last_l):
+            return None
+        return (last_s > last_l, last_s, last_l)
+    except Exception:
+        return None
+
+
 def load_higher_timeframe_indicators(ticker, timeframe, count=50, current_price=None, macro_ema_long=None):
     """
     상위 타임프레임(일봉) 지표: 일봉 EMA 대비 현재가로 상승/하락 추세 판단.

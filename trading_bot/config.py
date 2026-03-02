@@ -44,3 +44,20 @@ CANDLE_SYNC_OFFSET_SEC = int(os.environ.get('CANDLE_SYNC_OFFSET_SEC', '60'))
 # auto_tuner가 [5, 20, 30, 50, 100] 중 최적값을 TuningRun에 저장 → param_manager가 읽음.
 # 튜닝 데이터가 없을 때의 최종 fallback.
 MACRO_EMA_LONG = int(os.getenv('MACRO_EMA_LONG', 50))
+
+# Drawdown Circuit Breaker 임계값 (%)
+DD_DAILY_LIMIT_PCT = float(os.environ.get('DD_DAILY_LIMIT_PCT', '5.0'))
+DD_TOTAL_LIMIT_PCT = float(os.environ.get('DD_TOTAL_LIMIT_PCT', '15.0'))
+
+# Breakeven Stop: 이 ROI(%) 도달 후 트레일링 스탑 하한을 avg_buy로 고정
+BREAKEVEN_ROI_PCT = float(os.environ.get('BREAKEVEN_ROI_PCT', '3.0'))
+
+# Volatility Targeting: 포지션 사이징 목표 변동성 (연율화)
+TARGET_VOL_PCT = float(os.environ.get('TARGET_VOL_PCT', '0.02'))
+
+# Fear & Greed Index 임계값
+FNG_EXTREME_FEAR = int(os.environ.get('FNG_EXTREME_FEAR', '20'))
+FNG_EXTREME_GREED = int(os.environ.get('FNG_EXTREME_GREED', '80'))
+
+# Multi-TF 4h Confluence 활성화
+MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true', 'yes')

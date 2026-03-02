@@ -185,15 +185,16 @@ def compute_total_account_equity(executor, tickers):
     return float(total or 0.0)
 
 
-def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global_bull_market):
+def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global_bull_market,
+                           ticker=None, fng_value=50):
     """
-    Regime-Dependent Dynamic Position Sizing (Risk Parity).
+    Regime-Dependent Dynamic Position Sizing (Risk Parity + Volatility Targeting + FNG).
     반환: (final_buy_krw, risk_pct, sl_distance)
     """
     if current_price is None or current_price <= 0 or total_equity <= 0:
         return 0.0, 0.0, 0.0
 
-    risk_pct = RISK_PCT_BULL if is_global_bull_market else RISK_PCT_BEAR  # [IMPROVED]
+    risk_pct = RISK_PCT_BULL if is_global_bull_market else RISK_PCT_BEAR
     risk_amount = total_equity * risk_pct
 
     try:
@@ -204,14 +205,38 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
     if not (atr_val and atr_val > 0):
         sl_distance = current_price * 0.05
     else:
-        sl_distance = atr_val * ATR_SL_MULT  # [IMPROVED]
+        sl_distance = atr_val * ATR_SL_MULT
 
     if sl_distance <= 0:
         return 5000.0, risk_pct, 0.1
 
     target_quantity = risk_amount / sl_distance
     base_buy_krw = target_quantity * current_price
-    max_per_coin = total_equity * MAX_PER_COIN_PCT  # [IMPROVED]
+
+    # Volatility Targeting: realized vol이 높으면 포지션 축소
+    vol_scale = 1.0
+    if ticker:
+        try:
+            from trading_bot.data_manager import compute_realized_vol
+            from trading_bot.config import TARGET_VOL_PCT
+            realized_vol = compute_realized_vol(ticker)
+            if realized_vol > 0:
+                vol_scale = min(1.5, max(0.3, TARGET_VOL_PCT / realized_vol))
+        except Exception:
+            pass
+    base_buy_krw *= vol_scale
+
+    # Fear & Greed Index 조정
+    try:
+        from trading_bot.config import FNG_EXTREME_FEAR, FNG_EXTREME_GREED
+        if fng_value <= FNG_EXTREME_FEAR:
+            base_buy_krw *= 1.2  # 극단적 공포: 20% 증가
+        elif fng_value >= FNG_EXTREME_GREED:
+            base_buy_krw *= 0.5  # 극단적 탐욕: 50% 축소
+    except Exception:
+        pass
+
+    max_per_coin = total_equity * MAX_PER_COIN_PCT
     bounded_buy_krw = min(max(base_buy_krw, MIN_ORDER_KRW), max_per_coin)
 
     try:
@@ -473,6 +498,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 set_scale_out_stage(ticker, next_scale_out_stage, avg_buy_price or 0.0)
             if sell_size_pct >= 1.0:
                 get_scale_out_state(ticker, 0.0, 0.0)
+                try:
+                    from trading_bot.scale_out_manager import reset_trailing_high
+                    reset_trailing_high(ticker)
+                except Exception:
+                    pass
             _notify(f'🔴 매도 체결: {ticker} @ {current_price:,.0f}원', level='TRADE')
             return 'executed', None, None
         except Exception as e:
@@ -547,6 +577,66 @@ def run_cycle(mode):
         except Exception as e:
             logger.warning('[HARD STOP-LOSS] 체크 중 오류 (계속 진행): %s', e)
 
+    # ----- Circuit Breaker: 일간/전체 DD 초과 시 매수 차단 + 포지션 50% 축소 -----
+    circuit_breaker_active = False
+    try:
+        from trading_bot.risk import check_circuit_breaker, get_system_state, set_system_state
+        from trading_bot.balanced_plus import log_execution_event as _cb_log, TAG_CB_SELL
+        from datetime import date as _date_cls
+
+        current_equity = compute_total_account_equity(executor, tickers)
+        peak_equity = float(get_system_state('peak_equity', '0') or 0)
+        daily_start_equity = float(get_system_state('daily_start_equity', '0') or 0)
+        last_daily_date = get_system_state('daily_start_date', '')
+
+        today_str = _date_cls.today().isoformat()
+
+        # 일자 변경 시 daily_start 갱신
+        if last_daily_date != today_str:
+            set_system_state('daily_start_equity', str(current_equity))
+            set_system_state('daily_start_date', today_str)
+            daily_start_equity = current_equity
+
+        # peak 갱신 (최초 또는 신고점)
+        if current_equity > peak_equity:
+            set_system_state('peak_equity', str(current_equity))
+            peak_equity = current_equity
+
+        # daily_start가 0이면 초기화
+        if daily_start_equity <= 0:
+            set_system_state('daily_start_equity', str(current_equity))
+            daily_start_equity = current_equity
+
+        cb_triggered, cb_reason, daily_dd, total_dd = check_circuit_breaker(
+            current_equity, peak_equity, daily_start_equity
+        )
+        if cb_triggered:
+            circuit_breaker_active = True
+            logger.info('🚨 [CIRCUIT BREAKER] %s (일간DD=%.1f%%, 전체DD=%.1f%%)', cb_reason, daily_dd, total_dd)
+            ai_logger.info('[CIRCUIT_BREAKER] %s | daily_dd=%.1f%% | total_dd=%.1f%%', cb_reason, daily_dd, total_dd)
+            _notify(f'🚨 Circuit Breaker 발동!\n{cb_reason}\n일간DD: {daily_dd:.1f}%\n전체DD: {total_dd:.1f}%', level='CRITICAL')
+
+            # 보유 포지션 50% 강제 축소
+            import pyupbit
+            for t in tickers:
+                qty = executor.get_position_qty(t)
+                if qty and qty > 0:
+                    cur_p = pyupbit.get_current_price(t)
+                    if cur_p and cur_p * qty >= MIN_ORDER_KRW:
+                        try:
+                            executor.place_order('sell', cur_p, size_pct=0.5, ticker=t)
+                            logger.info('🔴 [CB] %s 포지션 50%% 축소 실행 (가격 %.0f)', t, cur_p)
+                            ai_logger.info('[EXECUTE] %s | ACTION:SELL | CB_50PCT | price:%.0f', t, cur_p)
+                            _cb_log(t, 'sell', TAG_CB_SELL, cur_p)
+                            stats['executed'] = stats.get('executed', 0) + 1
+                        except Exception as e:
+                            logger.warning('[CB] %s 축소 실행 실패: %s', t, e)
+            executor.refresh_balance_cache()
+        else:
+            logger.info('✅ Circuit Breaker 정상 (일간DD=%.1f%%, 전체DD=%.1f%%)', daily_dd, total_dd)
+    except Exception as e:
+        logger.warning('[CIRCUIT BREAKER] 체크 중 오류 (계속 진행): %s', e)
+
     # ----- BTC 거시 장세 필터: 1회 조회 후 이번 사이클 매수 허용 여부 결정 -----
     from trading_bot.param_manager import get_best_params as _get_best_params_cycle
     _cycle_params = _get_best_params_cycle()
@@ -556,6 +646,17 @@ def run_cycle(mode):
     )
     if not is_global_bull_market:
         logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
+
+    # ----- Fear & Greed Index: 1회 조회 후 이번 사이클 매수 사이징에 반영 -----
+    fng_value = 50
+    try:
+        from trading_bot.sentiment import fetch_fear_greed_index
+        fng_data = fetch_fear_greed_index()
+        fng_value = fng_data.get('value', 50)
+        fng_class = fng_data.get('classification', 'Neutral')
+        logger.info('📊 Fear & Greed Index: %d (%s)', fng_value, fng_class)
+    except Exception as e:
+        logger.debug('[FNG] 조회 실패 (중립값 사용): %s', e)
 
     # ----- Pass 1: 분석 및 매도 즉시 실행, 매수는 pending_buys에만 수집 -----
     try:
@@ -584,6 +685,10 @@ def run_cycle(mode):
 
     # ----- Pass 2: 매수 우선순위(ADX 내림차순) 정렬 후 Regime 기반 동적 포지션 사이징으로 순차 매수 -----
     # Bear market에서도 strategy가 필터링한 예외(ADX>=40, Volume 1.5x 등 Racehorse)는 pending_buys에 포함되므로 Pass 2 실행.
+    if circuit_breaker_active and pending_buys:
+        logger.info('🚨 [CIRCUIT BREAKER] 매수 %s건 전면 차단 (DD 초과)', len(pending_buys))
+        ai_logger.info('[CIRCUIT_BREAKER] 매수 %s건 차단', len(pending_buys))
+        pending_buys.clear()
     if not cycle_error and pending_buys:
         executor.refresh_balance_cache()
         remaining_cash = executor.get_available_cash()
@@ -647,13 +752,15 @@ def run_cycle(mode):
                 ai_logger.info('[SKIP] %s | REASON:SKIP_BUY_COOLDOWN', ticker)
                 continue
 
-            # Regime-Dependent Dynamic Position Sizing
+            # Regime-Dependent Dynamic Position Sizing (+ Volatility Targeting + FNG)
             final_buy_krw, risk_pct, sl_distance = calculate_dynamic_size(
                 total_equity=total_equity,
                 current_price=price,
                 atr=atr,
                 size_pct=size_pct,
                 is_global_bull_market=is_global_bull_market,
+                ticker=ticker,
+                fng_value=fng_value,
             )
             if final_buy_krw <= 0:
                 continue

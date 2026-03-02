@@ -51,6 +51,7 @@ TAG_PS1 = 'PS1'
 TAG_PS2 = 'PS2'
 TAG_EXEC_BUY = 'EXEC_BUY'
 TAG_EXEC_SELL = 'EXEC_SELL'
+TAG_CB_SELL = 'CB_SELL'
 
 
 def last_buy_ts(ticker: str):

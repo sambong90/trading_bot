@@ -65,3 +65,49 @@ def set_scale_out_stage(ticker: str, new_stage: int, current_avg_buy_price: floa
     finally:
         session.close()
 
+
+def get_trailing_high(ticker: str) -> float:
+    """DB에서 저장된 trailing_high 조회. 없으면 0.0."""
+    try:
+        session = get_session()
+        try:
+            record = session.query(PositionState).filter(PositionState.ticker == ticker).first()
+            return float(record.trailing_high or 0.0) if record else 0.0
+        finally:
+            session.close()
+    except Exception:
+        return 0.0
+
+
+def update_trailing_high(ticker: str, new_high: float) -> None:
+    """trailing_high를 ratchet 방식으로 갱신 (올라갈 때만 업데이트)."""
+    ensure_tables()
+    session = get_session()
+    try:
+        record = session.query(PositionState).filter(PositionState.ticker == ticker).first()
+        if record:
+            current = float(record.trailing_high or 0.0)
+            if new_high > current:
+                record.trailing_high = new_high
+                session.commit()
+        else:
+            session.add(PositionState(ticker=ticker, stage=0, avg_buy_price=0.0, trailing_high=new_high))
+            session.commit()
+    finally:
+        session.close()
+
+
+def reset_trailing_high(ticker: str) -> None:
+    """포지션 청산 시 trailing_high 리셋."""
+    try:
+        session = get_session()
+        try:
+            record = session.query(PositionState).filter(PositionState.ticker == ticker).first()
+            if record:
+                record.trailing_high = 0.0
+                session.commit()
+        finally:
+            session.close()
+    except Exception:
+        pass
+

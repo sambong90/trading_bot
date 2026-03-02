@@ -286,7 +286,29 @@ def _compute_trailing_stop(ticker, timeframe, closed_candle, position_qty, avg_b
     trailing_stop_price = None
     ts_reason = None
     if recent_highest is not None and atr_val is not None and atr_val > 0:
+        # Stateful trailing high: ratchet 방식 (절대 내려가지 않음)
+        if position_qty > 0:
+            try:
+                from trading_bot.scale_out_manager import get_trailing_high, update_trailing_high
+                stored_high = get_trailing_high(ticker)
+                if recent_highest > stored_high:
+                    update_trailing_high(ticker, recent_highest)
+                else:
+                    recent_highest = stored_high  # DB에 저장된 고점이 더 높으면 사용
+            except Exception:
+                pass
+
         trailing_stop_price = recent_highest - (atr_val * ts_mult)
+
+        # Breakeven Stop: ROI가 BREAKEVEN_ROI_PCT 이상이면 스탑 하한을 avg_buy로 고정
+        if position_qty > 0 and avg_buy_price > 0:
+            try:
+                from trading_bot.config import BREAKEVEN_ROI_PCT
+                if current_roi >= BREAKEVEN_ROI_PCT and trailing_stop_price < avg_buy_price:
+                    trailing_stop_price = avg_buy_price
+            except Exception:
+                pass
+
         if position_qty > 0:
             ts_reason = f'TrailingStop: {trailing_stop_price:.0f} (최고가{recent_highest:.0f} - ATR×{ts_mult})'
 
@@ -892,6 +914,34 @@ def generate_comprehensive_signal_with_logging(
         if nso is not None:
             next_scale_out_stage = nso
         decision_reason_parts.extend(reasons)
+
+        # 6b) Multi-TF 4h Confluence: buy 신호 강도 조정 ---------------
+        try:
+            from trading_bot.config import MTF_4H_ENABLED
+            if MTF_4H_ENABLED and signal == 'buy':
+                from trading_bot.data_manager import load_4h_ema_state
+                from trading_bot.param_manager import get_best_params as _gp4h
+                _p4h = _gp4h()
+                _4h_state = load_4h_ema_state(
+                    ticker,
+                    ema_short_period=_p4h.get('ema_short', 12),
+                    ema_long_period=_p4h.get('ema_long', 26),
+                )
+                if _4h_state is not None:
+                    _4h_golden, _4h_es, _4h_el = _4h_state
+                    if _4h_golden:
+                        # 1h + 4h 모두 골든크로스 → confluence 1.0 (변경 없음)
+                        decision_reason_parts.append(
+                            f'4h Confluence: 골든크로스 (EMA{_4h_es:.0f}>{_4h_el:.0f}) → 강한 매수'
+                        )
+                    else:
+                        # 1h 골든크로스 + 4h 데드크로스 → 약한 매수, 포지션 50%
+                        buy_size_pct = min(buy_size_pct, 0.5)
+                        decision_reason_parts.append(
+                            f'4h Confluence: 데드크로스 (EMA{_4h_es:.0f}<{_4h_el:.0f}) → 비중 50%'
+                        )
+        except Exception:
+            pass
 
         # RSI overbought sell reinforcement
         if signal == 'sell' and position_qty > 0 and rsi >= RSI_SELL_MIN:
