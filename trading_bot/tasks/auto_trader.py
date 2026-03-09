@@ -604,6 +604,23 @@ def run_cycle(mode):
             set_system_state('daily_start_equity', str(current_equity))
             daily_start_equity = current_equity
 
+        # ── 단일 사이클 급변 감지: 입출금으로 인한 CB 오발동 방지 ──────────────
+        # 1분 사이클 내 20% 이상 equity 변화 → 매매가 아닌 입출금으로 간주 → 기준값 리셋
+        _SUDDEN_CHANGE_THRESHOLD = float(os.environ.get('SUDDEN_CHANGE_PCT', '0.20'))
+        prev_cycle_equity = float(get_system_state('prev_cycle_equity', '0') or 0)
+        if prev_cycle_equity > 0:
+            cycle_change_pct = abs(current_equity - prev_cycle_equity) / prev_cycle_equity
+            if cycle_change_pct > _SUDDEN_CHANGE_THRESHOLD:
+                logger.info(
+                    '[CB] 단일 사이클 equity 급변 (%.1f%%) — 입출금 감지, CB 기준값 리셋',
+                    cycle_change_pct * 100,
+                )
+                set_system_state('daily_start_equity', str(current_equity))
+                set_system_state('peak_equity', str(current_equity))
+                daily_start_equity = current_equity
+                peak_equity = current_equity
+        set_system_state('prev_cycle_equity', str(current_equity))
+
         cb_triggered, cb_reason, daily_dd, total_dd = check_circuit_breaker(
             current_equity, peak_equity, daily_start_equity
         )
