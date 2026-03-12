@@ -655,9 +655,10 @@ def run_cycle(mode):
     from trading_bot.param_manager import get_best_params as _get_best_params_cycle
     _cycle_params = _get_best_params_cycle()
     _macro_ema_long = int(_cycle_params.get('macro_ema_long', 50))
-    is_global_bull_market = check_btc_global_trend(
-        interval='day', count=max(50, _macro_ema_long + 10), ema_long=_macro_ema_long
-    )
+    # check_btc_global_trend은 ema_short(20) vs ema_long(50) 고정 사용.
+    # macro_ema_long은 strategy.py 단일 EMA 필터 전용이므로 여기서 넘기면
+    # macro_ema_long < ema_short(20) 시 단기/장기 역전으로 오판 발생.
+    is_global_bull_market = check_btc_global_trend(interval='day', count=60)
     if not is_global_bull_market:
         logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
 
