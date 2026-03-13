@@ -641,7 +641,7 @@ def run_cycle(mode):
                 qty = executor.get_position_qty(t)
                 if qty and qty > 0:
                     cur_p = pyupbit.get_current_price(t)
-                    if cur_p and cur_p * qty >= MIN_ORDER_KRW:
+                    if cur_p and cur_p * qty * 0.5 >= MIN_ORDER_KRW:
                         try:
                             executor.place_order('sell', cur_p, size_pct=0.5, ticker=t)
                             logger.info('🔴 [CB] %s 포지션 50%% 축소 실행 (가격 %.0f)', t, cur_p)
