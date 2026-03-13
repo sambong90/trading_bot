@@ -144,6 +144,64 @@ def check_btc_global_trend(interval='day', count=50, ema_short=5, ema_long=20):
         return True
 
 
+def sync_manual_trades(executor, tickers):
+    """refresh_balance_cache() 직후 호출. 이전 사이클 잔고와 비교해 수동 거래를 감지하고
+    ExecutionEvent(MANUAL_BUY/MANUAL_SELL)에 기록. last_buy_ts()가 이를 읽어 쿨다운 적용."""
+    try:
+        from trading_bot.risk import get_system_state, set_system_state
+        from trading_bot.balanced_plus import (
+            log_execution_event, TAG_EXEC_BUY, TAG_EXEC_SELL,
+            TAG_DCA_BUY, TAG_CB_SELL, TAG_PS1, TAG_PS2,
+            TAG_MANUAL_BUY, TAG_MANUAL_SELL,
+        )
+        from trading_bot.db import get_session
+        from trading_bot.models import ExecutionEvent
+        import json
+        import datetime as _dt
+
+        cache = getattr(executor, '_balance_cache', {}) or {}
+        avg_cache = getattr(executor, '_avg_buy_price_cache', {}) or {}
+
+        prev_json = get_system_state('balance_snapshot', '{}')
+        try:
+            prev = json.loads(prev_json)
+        except Exception:
+            prev = {}
+
+        if prev:
+            managed_assets = {t.split('-')[1]: t for t in tickers if '-' in t}
+            bot_tags = (TAG_EXEC_BUY, TAG_EXEC_SELL, TAG_DCA_BUY, TAG_CB_SELL, TAG_PS1, TAG_PS2)
+            for asset, ticker in managed_assets.items():
+                prev_qty = float(prev.get(asset, 0) or 0)
+                curr_qty = float(cache.get(asset, 0) or 0)
+                if abs(curr_qty - prev_qty) < 1e-10:
+                    continue
+                # 봇 주문 여부: 최근 2분 내 ExecutionEvent 확인
+                session = get_session()
+                try:
+                    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=2)
+                    recent_bot = session.query(ExecutionEvent).filter(
+                        ExecutionEvent.ticker == ticker,
+                        ExecutionEvent.ts >= cutoff,
+                        ExecutionEvent.tag.in_(bot_tags),
+                    ).first()
+                finally:
+                    session.close()
+                if recent_bot:
+                    continue
+                if curr_qty > prev_qty:
+                    avg_price = float(avg_cache.get(asset, 0) or 0)
+                    logger.info('[수동 거래 감지] %s 매수 %.6f→%.6f (avg=%.0f원)', ticker, prev_qty, curr_qty, avg_price)
+                    log_execution_event(ticker, 'buy', TAG_MANUAL_BUY, avg_price)
+                else:
+                    logger.info('[수동 거래 감지] %s 매도 %.6f→%.6f', ticker, prev_qty, curr_qty)
+                    log_execution_event(ticker, 'sell', TAG_MANUAL_SELL, None)
+
+        set_system_state('balance_snapshot', json.dumps(dict(cache)))
+    except Exception as e:
+        logger.debug('[sync_manual_trades] 오류 (무시): %s', e)
+
+
 def compute_total_account_equity(executor, tickers):
     """
     현재 사이클 기준 총 계좌 평가액(KRW)을 근사 계산.
@@ -541,6 +599,7 @@ def run_cycle(mode):
 
     # Live 시 잔고 1회 조회 후 캐시 사용 → 티커별 get_position_qty 시 API 추가 호출 없음
     executor.refresh_balance_cache()
+    sync_manual_trades(executor, tickers)
     try:
         cash = executor.get_available_cash()
         msg = (

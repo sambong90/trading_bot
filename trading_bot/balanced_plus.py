@@ -52,20 +52,35 @@ TAG_PS2 = 'PS2'
 TAG_EXEC_BUY = 'EXEC_BUY'
 TAG_EXEC_SELL = 'EXEC_SELL'
 TAG_CB_SELL = 'CB_SELL'
+TAG_MANUAL_BUY = 'MANUAL_BUY'
+TAG_MANUAL_SELL = 'MANUAL_SELL'
+
+_BUY_EXEC_TAGS = (TAG_EXEC_BUY, TAG_DCA_BUY, TAG_MANUAL_BUY)
 
 
 def last_buy_ts(ticker: str):
-    """Latest AnalysisResult where ticker==ticker and signal=='buy'. Returns None on error."""
+    """Latest buy ts from AnalysisResult(signal='buy') OR ExecutionEvent(EXEC_BUY/DCA_BUY/MANUAL_BUY).
+    수동 매수도 쿨다운 적용을 위해 ExecutionEvent도 함께 조회."""
     try:
         from trading_bot.db import get_session
-        from trading_bot.models import AnalysisResult
+        from trading_bot.models import AnalysisResult, ExecutionEvent
         session = get_session()
         try:
-            row = session.query(AnalysisResult).filter(
+            ar_row = session.query(AnalysisResult).filter(
                 AnalysisResult.ticker == ticker,
                 AnalysisResult.signal == 'buy'
             ).order_by(AnalysisResult.timestamp.desc()).limit(1).first()
-            return row.timestamp if row and row.timestamp else None
+            ar_ts = ar_row.timestamp if ar_row and ar_row.timestamp else None
+
+            ee_row = session.query(ExecutionEvent).filter(
+                ExecutionEvent.ticker == ticker,
+                ExecutionEvent.tag.in_(_BUY_EXEC_TAGS),
+            ).order_by(ExecutionEvent.ts.desc()).limit(1).first()
+            ee_ts = ee_row.ts if ee_row and ee_row.ts else None
+
+            if ar_ts and ee_ts:
+                return max(ar_ts, ee_ts)
+            return ar_ts or ee_ts
         finally:
             session.close()
     except Exception:
