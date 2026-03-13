@@ -147,7 +147,8 @@ def check_btc_global_trend(interval='day', count=50, ema_short=5, ema_long=20):
 def compute_total_account_equity(executor, tickers):
     """
     현재 사이클 기준 총 계좌 평가액(KRW)을 근사 계산.
-    - 가용 KRW + 각 티커 보유수량 * 현재가(Upbit 시세)
+    - 가용 KRW + 계좌 내 모든 non-KRW 자산 * 현재가(Upbit 시세)
+    - 봇 관리 티커 외 수동 매수 자산도 포함하여 서킷 브레이커 오발동 방지
     """
     try:
         import pyupbit
@@ -160,19 +161,30 @@ def compute_total_account_equity(executor, tickers):
     except Exception:
         total = 0.0
 
-    seen = set()
+    # asset → ticker 매핑 (봇 관리 티커 우선)
+    asset_to_ticker = {}
     for t in tickers:
-        if t in seen:
+        if '-' in t:
+            asset_to_ticker[t.split('-')[1]] = t
+
+    # 계좌 내 모든 non-KRW 자산 포함 (수동 매수 자산도 포함)
+    cache = getattr(executor, '_balance_cache', {}) or {}
+    avg_cache = getattr(executor, '_avg_buy_price_cache', {}) or {}
+    seen = set()
+    for asset, bal in cache.items():
+        if asset == 'KRW' or asset in seen:
             continue
-        seen.add(t)
+        seen.add(asset)
+        qty = float(bal or 0)
+        if qty <= 0:
+            continue
+        ticker = asset_to_ticker.get(asset, f'KRW-{asset}')
         try:
-            qty = float(executor.get_position_qty(t) or 0)
-            if qty <= 0:
-                continue
-            price = pyupbit.get_current_price(t)
+            price = pyupbit.get_current_price(ticker)
             if price is None:
-                continue
-            total += qty * float(price)
+                price = float(avg_cache.get(asset) or 0)
+            if price and price > 0:
+                total += qty * float(price)
         except Exception:
             continue
     return float(total or 0.0)
