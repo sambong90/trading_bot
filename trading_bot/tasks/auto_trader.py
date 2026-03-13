@@ -116,15 +116,15 @@ def get_executor(mode):
 # ---------------------------------------------------------------------------
 # BTC 거시 장세 필터 (Global Market Filter): 대장주 하락 시 알트 매수 리스크 방지
 # ---------------------------------------------------------------------------
-def check_btc_global_trend(interval='day', count=50, ema_short=20, ema_long=50):
+def check_btc_global_trend(interval='day', count=50, ema_short=5, ema_long=20):
     """
-    KRW-BTC의 장기 봉(일봉/4시간봉) 기준 EMA로 상승장 여부 판단.
-    - 현재가 < EMA50 → 하락장(False)
-    - 단기 이평이 장기 이평을 데드크로스한 상태(EMA20 < EMA50) → 하락장(False)
-    - 그 외 → 상승/안전장(True)
+    KRW-BTC 일봉 기준 EMA 크로스로 상승장 여부 판단.
+    - EMA5 > EMA20 (골든크로스 상태) → 상승장(True)
+    - EMA5 < EMA20 (데드크로스 상태) → 하락장(False)
+    EMA20>EMA50 대비 반응이 빠르면서, 단순 현재가>EMA 대비 노이즈가 적음.
+    (며칠간 상승 모멘텀 유지돼야 True 반환)
     실패 시 안전하게 True 반환(필터 비적용).
     """
-    import pandas as pd
     try:
         from trading_bot.data import fetch_ohlcv
         df = fetch_ohlcv(ticker='KRW-BTC', interval=interval, count=count, use_db_first=True)
@@ -133,18 +133,11 @@ def check_btc_global_trend(interval='day', count=50, ema_short=20, ema_long=50):
         close = df['close']
         ema_s = close.ewm(span=ema_short, adjust=False).mean()
         ema_l = close.ewm(span=ema_long, adjust=False).mean()
-        current_price = float(close.iloc[-1])
         last_ema_s = float(ema_s.iloc[-1])
         last_ema_l = float(ema_l.iloc[-1])
-        prev_ema_s = float(ema_s.iloc[-2]) if len(ema_s) >= 2 else last_ema_s
-        prev_ema_l = float(ema_l.iloc[-2]) if len(ema_l) >= 2 else last_ema_l
-        # 하락장 조건: 현재가가 EMA50 미만, 또는 데드크로스 상태(단기 < 장기)
-        if current_price < last_ema_l:
-            return False
-        if last_ema_s < last_ema_l and prev_ema_s >= prev_ema_l:
-            return False  # 방금 데드크로스
+        # EMA5 < EMA20 → 데드크로스 → 하락장
         if last_ema_s < last_ema_l:
-            return False  # 이미 데드크로스된 상태
+            return False
         return True
     except Exception as e:
         logger.debug('check_btc_global_trend 실패(필터 비적용): %s', e)
