@@ -187,11 +187,13 @@ def is_in_partial_stop_cooldown(ticker: str) -> bool:
 def count_open_positions(executor, tickers: list) -> int:
     """Count tickers with position qty > 0. Paper: executor.positions; Live: _balance_cache non-KRW with balance > 0."""
     try:
+        # 봇이 관리하는 티커의 asset 집합 (예: "KRW-BTC" → "BTC")
+        managed_assets = {t.split('-')[1] for t in tickers if '-' in t}
         if hasattr(executor, 'positions'):
-            return sum(1 for t, p in getattr(executor, 'positions', {}).items() if (p.get('qty') or 0) > 0)
+            return sum(1 for t, p in getattr(executor, 'positions', {}).items() if t in tickers and (p.get('qty') or 0) > 0)
         if hasattr(executor, '_balance_cache'):
             cache = getattr(executor, '_balance_cache', {}) or {}
-            return sum(1 for cur, bal in cache.items() if cur != 'KRW' and float(bal or 0) > 0)
+            return sum(1 for cur, bal in cache.items() if cur in managed_assets and float(bal or 0) > 0)
         return sum(1 for t in tickers if (executor.get_position_qty(t) or 0) > 0)
     except Exception:
         return 0
