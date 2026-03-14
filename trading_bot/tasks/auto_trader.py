@@ -144,6 +144,35 @@ def check_btc_global_trend(interval='day', count=50, ema_short=5, ema_long=20):
         return True
 
 
+def _record_manual_order(ticker: str, side: str, price: float, qty: float):
+    """수동 거래를 Order 테이블에 기록하여 P&L 계산에 반영."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import Order
+        import datetime as _dt
+        if not price or not qty:
+            return
+        session = get_session()
+        try:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            o = Order(
+                order_id=f'manual_{side}_{ticker}_{int(now.timestamp())}',
+                ts=now,
+                side=side,
+                price=float(price),
+                qty=float(qty),
+                status='done',
+                fee=0.0,
+                raw={'manual': True, 'ticker': ticker},
+            )
+            session.add(o)
+            session.commit()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.debug('[_record_manual_order] 오류 (무시): %s', e)
+
+
 def sync_manual_trades(executor, tickers):
     """refresh_balance_cache() 직후 호출. 이전 사이클 잔고와 비교해 수동 거래를 감지하고
     ExecutionEvent(MANUAL_BUY/MANUAL_SELL)에 기록. last_buy_ts()가 이를 읽어 쿨다운 적용."""
@@ -191,11 +220,17 @@ def sync_manual_trades(executor, tickers):
                     continue
                 if curr_qty > prev_qty:
                     avg_price = float(avg_cache.get(asset, 0) or 0)
+                    delta_qty = curr_qty - prev_qty
                     logger.info('[수동 거래 감지] %s 매수 %.6f→%.6f (avg=%.0f원)', ticker, prev_qty, curr_qty, avg_price)
                     log_execution_event(ticker, 'buy', TAG_MANUAL_BUY, avg_price)
+                    _record_manual_order(ticker, 'buy', avg_price, delta_qty)
                 else:
+                    delta_qty = prev_qty - curr_qty
+                    # 매도 시 평균매수가를 fill price로 근사 (실제 체결가 미조회)
+                    avg_price = float(avg_cache.get(asset, 0) or 0)
                     logger.info('[수동 거래 감지] %s 매도 %.6f→%.6f', ticker, prev_qty, curr_qty)
-                    log_execution_event(ticker, 'sell', TAG_MANUAL_SELL, None)
+                    log_execution_event(ticker, 'sell', TAG_MANUAL_SELL, avg_price)
+                    _record_manual_order(ticker, 'sell', avg_price, delta_qty)
 
         set_system_state('balance_snapshot', json.dumps(dict(cache)))
     except Exception as e:
