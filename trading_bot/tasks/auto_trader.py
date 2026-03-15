@@ -281,7 +281,8 @@ def compute_total_account_equity(executor, tickers):
             price = pyupbit.get_current_price(ticker)
             if price is None:
                 price = float(avg_cache.get(asset) or 0)
-        except Exception:
+        except Exception as _price_exc:
+            logger.warning('[equity] %s 시세 조회 예외 → avg_buy_price fallback: %s', ticker, _price_exc)
             price = float(avg_cache.get(asset) or 0)
         if price and price > 0:
             total += qty * float(price)
