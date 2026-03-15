@@ -62,6 +62,11 @@ if not _has_ai_handler:
 
 DEFAULT_INTERVAL = 'minute60'
 DEFAULT_COUNT = 200
+
+# 매수 직후 Upbit 정산 딜레이 동안 자산이 _balance_cache에 반영되기 전까지
+# 매수 비용을 equity에 보정하기 위한 임시 저장소
+# { asset: (cost_krw, bought_at_timestamp) }
+_pending_buy_costs: dict = {}
 ACCOUNT_VALUE = float(os.environ.get('ACCOUNT_VALUE', '100000'))
 # 업비트 최소 주문 금액(원). 이 금액 미만 보유 시 매도 신호 무시(무의미한 반복 로깅 방지)
 MIN_ORDER_KRW = 5000
@@ -280,6 +285,23 @@ def compute_total_account_equity(executor, tickers):
                 total += qty * float(price)
         except Exception:
             continue
+
+    # 매수 직후 Upbit 정산 딜레이 보정:
+    # _balance_cache에 아직 반영 안 된 매수 비용을 equity에 더해 CB 오발동 방지
+    now_ts = __import__('time').time()
+    stale_assets = []
+    for asset, (cost_krw, bought_at) in list(_pending_buy_costs.items()):
+        age = now_ts - bought_at
+        if age > 300:  # 5분 초과 → 정산 완료로 간주, 제거
+            stale_assets.append(asset)
+            continue
+        qty_in_cache = float(cache.get(asset) or 0)
+        if qty_in_cache <= 0:
+            # 아직 _balance_cache에 미반영 → 매수 비용만큼 equity 보정
+            total += cost_krw
+    for a in stale_assets:
+        _pending_buy_costs.pop(a, None)
+
     return float(total or 0.0)
 
 
@@ -950,6 +972,13 @@ def run_cycle(mode):
                 buys_executed_this_cycle += 1
                 try:
                     log_execution_event(ticker, 'buy', TAG_EXEC_BUY, price)
+                except Exception:
+                    pass
+                # 매수 비용을 pending에 등록 → Upbit 정산 딜레이 동안 equity 보정
+                try:
+                    import time as _time
+                    asset = ticker.split('-')[1] if '-' in ticker else ticker
+                    _pending_buy_costs[asset] = (float(final_buy_krw), _time.time())
                 except Exception:
                     pass
                 executor.refresh_balance_cache()
