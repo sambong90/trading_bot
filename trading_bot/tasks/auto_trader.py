@@ -619,8 +619,8 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
         sell_size_pct = result.get('sell_size_pct', 1.0)
         next_scale_out_stage = result.get('next_scale_out_stage')
         try:
-            executor.place_order('sell', current_price, size_pct=sell_size_pct, ticker=ticker)
-            logger.info('✅ %s 매도 신호 실행: 가격 %.0f, 비중 %.0f%%', ticker, current_price, sell_size_pct * 100)
+            fill_price_sell = executor.place_order('sell', current_price, size_pct=sell_size_pct, ticker=ticker) or current_price
+            logger.info('✅ %s 매도 신호 실행: 가격 %.0f, 비중 %.0f%%', ticker, fill_price_sell, sell_size_pct * 100)
             try:
                 from trading_bot.ai_logger import log_ai_event
                 log_ai_event(
@@ -649,7 +649,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                     reset_trailing_high(ticker)
                 except Exception:
                     pass
-            _notify(f'🔴 매도 체결: {ticker} @ {current_price:,.0f}원', level='TRADE')
+            _notify(f'🔴 매도 체결: {ticker} @ {fill_price_sell:,.0f}원', level='TRADE')
             return 'executed', None, None
         except Exception as e:
             logger.warning('[오류] %s — 매도 주문 실행 실패: %s', ticker, str(e))
@@ -969,12 +969,12 @@ def run_cycle(mode):
                 continue
             effective_pct = alloc / remaining_cash
             try:
-                executor.place_order('buy', price, size_pct=effective_pct, ticker=ticker)
+                fill_price_buy = executor.place_order('buy', price, size_pct=effective_pct, ticker=ticker) or price
                 logger.info(
                     '✅ %s 매수 실행 (ADX=%.1f): 가격 %.0f, 동적 배분 %.0f원 (RegimeRisk: %.1f%%, size_pct: %.2f)',
                     ticker,
                     item.get('adx', 0),
-                    price,
+                    fill_price_buy,
                     alloc,
                     risk_pct * 100,
                     float(size_pct or 0.0),
@@ -1012,7 +1012,7 @@ def run_cycle(mode):
                     pass
                 executor.refresh_balance_cache()
                 remaining_cash = executor.get_available_cash()
-                _notify(f'🟢 매수 체결: {ticker} @ {price:,.0f}원 (비중 {size_pct*100:.1f}%)', level='TRADE')
+                _notify(f'🟢 매수 체결: {ticker} @ {fill_price_buy:,.0f}원 (비중 {size_pct*100:.1f}%)', level='TRADE')
             except Exception as e:
                 logger.warning('[오류] %s — 매수 주문 실행 실패: %s', ticker, str(e))
                 try:

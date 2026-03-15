@@ -611,7 +611,7 @@ class LiveExecutor:
                     except Exception:
                         pass
 
-                    return resp
+                    return fill_price
                 except (RuntimeError, ValueError) as e:
                     # 비즈니스 로직 에러는 재시도하지 않고 즉시 전파
                     raise
