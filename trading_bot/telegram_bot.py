@@ -200,13 +200,25 @@ def cmd_balance() -> str:
         if tickers:
             try:
                 import pyupbit
+                import json as _json
+                from trading_bot.risk import get_system_state
+                known_delisted = set(_json.loads(get_system_state('known_delisted_tickers', '[]') or '[]'))
+            except Exception:
+                pyupbit = None
+                known_delisted = set()
+            if pyupbit:
                 for t in tickers[:15]:
+                    if t in known_delisted:
+                        continue
                     qty = ex.get_position_qty(t)
                     if qty <= 0:
                         continue
                     avg = ex.get_avg_buy_price(t)
-                    cur = pyupbit.get_current_price(t)
-                    cur = float(cur) if cur is not None else 0.0
+                    try:
+                        cur = pyupbit.get_current_price(t)
+                        cur = float(cur) if cur is not None else 0.0
+                    except Exception:
+                        cur = 0.0
                     if avg and avg > 0 and cur > 0:
                         roi = (cur - avg) / avg * 100
                         val = qty * cur
@@ -217,8 +229,8 @@ def cmd_balance() -> str:
                         )
                     else:
                         lines.append(f'• <code>{html.escape(t)}</code>: {qty:.6f}')
-            except Exception as e:
-                lines.append(f'보유 조회 오류: {html.escape(str(e))}')
+            else:
+                lines.append('보유 조회 오류: pyupbit 로드 실패')
         else:
             lines.append('보유 종목 없음')
     except Exception as e:
