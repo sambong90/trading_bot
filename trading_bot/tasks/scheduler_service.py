@@ -321,7 +321,8 @@ def run_market_briefing() -> None:
             _log(f'[스케줄러] market_briefing 중복 방지 — {period_key} 이미 발송됨')
             return
     except Exception as _e:
-        _log(f'[스케줄러] market_briefing 중복 방지 DB 체크 실패 (무시): {_e}')
+        _log(f'[스케줄러] market_briefing 중복 방지 DB 체크 실패 → 발송 건너뜀: {_e}')
+        return
     _log('[스케줄러] market_briefing 실행')
     _run_subprocess(MARKET_BRIEFING_CMD, 'market_briefing', timeout_seconds=120)
 
