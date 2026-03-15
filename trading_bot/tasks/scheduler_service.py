@@ -303,6 +303,25 @@ def run_auto_tuner() -> None:
 
 def run_market_briefing() -> None:
     """Periodic Market Briefing: BTC 추세, 계좌·ROI, 24h P&L, ADX 상위 3 -> Telegram."""
+    # 파드 재시작 시 동일 시간대 중복 발송 방지: DB에 발송 이력 원자적 기록
+    from datetime import datetime as _dt
+    period_key = f'briefing_{_dt.now().strftime("%Y-%m-%d %H:00")}'
+    try:
+        import psycopg2 as _pg
+        _conn = _pg.connect(os.environ.get('DB_URL', ''))
+        _cur = _conn.cursor()
+        _cur.execute(
+            "INSERT INTO system_state(key, value) VALUES(%s, %s) ON CONFLICT(key) DO NOTHING",
+            (period_key, '1')
+        )
+        inserted = _cur.rowcount
+        _conn.commit()
+        _conn.close()
+        if not inserted:
+            _log(f'[스케줄러] market_briefing 중복 방지 — {period_key} 이미 발송됨')
+            return
+    except Exception as _e:
+        _log(f'[스케줄러] market_briefing 중복 방지 DB 체크 실패 (무시): {_e}')
     _log('[스케줄러] market_briefing 실행')
     _run_subprocess(MARKET_BRIEFING_CMD, 'market_briefing', timeout_seconds=120)
 
