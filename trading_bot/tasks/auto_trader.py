@@ -67,6 +67,8 @@ DEFAULT_COUNT = 200
 # 매수 비용을 equity에 보정하기 위한 임시 저장소
 # { asset: (cost_krw, bought_at_timestamp) }
 _pending_buy_costs: dict = {}
+# 상장폐지 확인된 티커 캐시 — Code not found 최초 감지 시 저장, 이후 API 호출 스킵
+_delisted_tickers: set = set()
 ACCOUNT_VALUE = float(os.environ.get('ACCOUNT_VALUE', '100000'))
 # 업비트 최소 주문 금액(원). 이 금액 미만 보유 시 매도 신호 무시(무의미한 반복 로깅 방지)
 MIN_ORDER_KRW = 5000
@@ -277,11 +279,21 @@ def compute_total_account_equity(executor, tickers):
         if qty <= 0:
             continue
         ticker = asset_to_ticker.get(asset, f'KRW-{asset}')
+        if ticker in _delisted_tickers:
+            logger.debug('[equity] %s 상장폐지 캐시 → 제외', ticker)
+            continue
         try:
             price = pyupbit.get_current_price(ticker)
             if price is None:
                 price = float(avg_cache.get(asset) or 0)
         except Exception as _price_exc:
+            err_msg = str(_price_exc)
+            if 'Code not found' in err_msg:
+                if ticker not in _delisted_tickers:
+                    _delisted_tickers.add(ticker)
+                    logger.warning('[equity] %s 상장폐지 감지 → 이후 equity 제외', ticker)
+                    _notify(f'⚠️ 상장폐지 코인 감지: {ticker}\n계좌에 보유 중이나 Upbit에서 거래 불가 상태입니다. 수동 확인 필요.', level='CRITICAL')
+                continue
             logger.warning('[equity] %s 시세 조회 예외 → avg_buy_price fallback: %s', ticker, _price_exc)
             price = float(avg_cache.get(asset) or 0)
         if price and price > 0:
