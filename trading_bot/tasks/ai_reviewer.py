@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-AI Reviewer — Walk-Forward 파라미터 변경 분석 + 주간 성과 요약 (Claude API 활용)
+AI Reviewer — Walk-Forward 파라미터 변경 분석 + 주간 성과 요약 (GitHub Copilot API 활용)
 
 실행 흐름:
   1. TuningRun 최근 2건: 이전 vs 신규 파라미터 비교
   2. Orders 테이블 최근 7일: 실제 체결(buy/sell) 기반 성과 집계
      - 총 체결 건수, 승률, 총 PnL, 평균 ROI, 최대 수익/손실 트레이드
-  3. Claude claude-sonnet-4-6에게 헤지펀드 스타일 한국어 브리핑 생성 요청
+  3. GitHub Copilot gpt-4o-mini에게 헤지펀드 스타일 한국어 브리핑 생성 요청
   4. Telegram으로 전송
 
 스케줄: 매주 일요일 04:30 (auto_tuner 04:00 완료 후)
@@ -166,7 +166,7 @@ def _fetch_weekly_performance(days=7) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 3. Claude 브리핑 생성
+# 3. GitHub Copilot 브리핑 생성
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """당신은 퀀트 헤지펀드의 수석 전략 분석가입니다.
@@ -231,20 +231,25 @@ def _build_user_prompt(tuning_runs: list, perf: dict, param_diffs: list[str]) ->
     )
 
 
-def _call_claude(user_prompt: str) -> str:
-    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+def _call_copilot(user_prompt: str) -> str:
+    api_key = os.environ.get('GITHUB_TOKEN', '')
     if not api_key:
-        raise EnvironmentError('ANTHROPIC_API_KEY가 설정되지 않았습니다.')
+        raise EnvironmentError('GITHUB_TOKEN이 설정되지 않았습니다.')
 
-    import anthropic
-    client = anthropic.Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model='claude-sonnet-4-6',
-        max_tokens=600,
-        system=_SYSTEM_PROMPT,
-        messages=[{'role': 'user', 'content': user_prompt}],
+    from openai import OpenAI
+    client = OpenAI(
+        base_url='https://models.inference.ai.azure.com',
+        api_key=api_key,
     )
-    return message.content[0].text.strip()
+    response = client.chat.completions.create(
+        model='gpt-4o-mini',
+        max_tokens=600,
+        messages=[
+            {'role': 'system', 'content': _SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_prompt},
+        ],
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +288,11 @@ def _run() -> None:
     # 3) 주간 성과 집계
     perf = _fetch_weekly_performance(days=7)
 
-    # 4) Claude 프롬프트 구성 및 API 호출
+    # 4) 프롬프트 구성 및 API 호출
     user_prompt = _build_user_prompt(tuning_runs, perf, param_diffs)
     logger.debug('[AI Reviewer] 프롬프트:\n%s', user_prompt)
 
-    briefing = _call_claude(user_prompt)
+    briefing = _call_copilot(user_prompt)
     logger.info('[AI Reviewer] 브리핑 생성 완료 (%d자)', len(briefing))
 
     # Telegram 4096자 제한 안전장치: 4000자 초과 시 잘라냄
