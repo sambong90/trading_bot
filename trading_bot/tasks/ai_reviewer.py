@@ -242,7 +242,7 @@ def _call_copilot(user_prompt: str) -> str:
         api_key=token,
     )
     response = client.chat.completions.create(
-        model='gpt-5-mini',
+        model='gpt-4o',
         max_tokens=600,
         messages=[
             {'role': 'system', 'content': _SYSTEM_PROMPT},
