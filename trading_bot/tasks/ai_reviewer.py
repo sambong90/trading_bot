@@ -232,17 +232,17 @@ def _build_user_prompt(tuning_runs: list, perf: dict, param_diffs: list[str]) ->
 
 
 def _call_copilot(user_prompt: str) -> str:
-    api_key = os.environ.get('GITHUB_TOKEN', '')
-    if not api_key:
-        raise EnvironmentError('GITHUB_TOKEN이 설정되지 않았습니다.')
+    token = os.environ.get('COPILOT_ACCESS_TOKEN', '')
+    if not token:
+        raise EnvironmentError('COPILOT_ACCESS_TOKEN이 설정되지 않았습니다.')
 
     from openai import OpenAI
     client = OpenAI(
-        base_url='https://models.inference.ai.azure.com',
-        api_key=api_key,
+        base_url='https://api.githubcopilot.com',
+        api_key=token,
     )
     response = client.chat.completions.create(
-        model='gpt-4o-mini',
+        model='gpt-5-mini',
         max_tokens=600,
         messages=[
             {'role': 'system', 'content': _SYSTEM_PROMPT},
