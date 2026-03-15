@@ -377,17 +377,27 @@ def _account_value_and_roi() -> tuple:
         total_value = krw
         try:
             import pyupbit
+            import json as _json
+            from trading_bot.risk import get_system_state
+            known_delisted = set(_json.loads(get_system_state('known_delisted_tickers', '[]') or '[]'))
+        except Exception:
+            pyupbit = None
+            known_delisted = set()
+        if pyupbit:
             for t in tickers:
+                if t in known_delisted:
+                    continue
                 qty = ex.get_position_qty(t)
                 if qty <= 0:
                     continue
                 avg = ex.get_avg_buy_price(t)
-                cur = pyupbit.get_current_price(t)
-                cur = float(cur) if cur is not None else 0.0
+                try:
+                    cur = pyupbit.get_current_price(t)
+                    cur = float(cur) if cur is not None else float(avg or 0)
+                except Exception:
+                    cur = float(avg or 0)
                 cost_basis += (avg or 0) * qty
                 total_value += cur * qty
-        except Exception:
-            pass
         roi = (total_value - cost_basis) / cost_basis * 100 if cost_basis > 0 else 0.0
         return total_value, roi
     except Exception:
