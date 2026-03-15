@@ -281,10 +281,10 @@ def compute_total_account_equity(executor, tickers):
             price = pyupbit.get_current_price(ticker)
             if price is None:
                 price = float(avg_cache.get(asset) or 0)
-            if price and price > 0:
-                total += qty * float(price)
         except Exception:
-            continue
+            price = float(avg_cache.get(asset) or 0)
+        if price and price > 0:
+            total += qty * float(price)
 
     # 매수 직후 Upbit 정산 딜레이 보정:
     # _balance_cache에 아직 반영 안 된 매수 비용을 equity에 더해 CB 오발동 방지
