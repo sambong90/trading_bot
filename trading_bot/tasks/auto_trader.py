@@ -292,13 +292,23 @@ def compute_total_account_equity(executor, tickers):
             err_msg = str(_price_exc)
             if _UPBIT_CODE_NOT_FOUND in err_msg:
                 _delisted_tickers.add(ticker)
-                logger.warning('[equity] %s 상장폐지 감지 → 이후 equity 제외', ticker)
-                threading.Thread(
-                    target=_notify,
-                    args=(f'⚠️ 상장폐지 코인 감지: {ticker}\n계좌에 보유 중이나 Upbit에서 거래 불가 상태입니다. 수동 확인 필요.',),
-                    kwargs={'level': 'CRITICAL'},
-                    daemon=True,
-                ).start()
+                logger.warning('[equity] %s 상장폐지 감지 → equity 제외', ticker)
+                # 최초 감지 시에만 알림 (DB에 없는 경우)
+                try:
+                    from trading_bot.risk import get_system_state, set_system_state
+                    import json as _json
+                    known = set(_json.loads(get_system_state('known_delisted_tickers', '[]') or '[]'))
+                    if ticker not in known:
+                        known.add(ticker)
+                        set_system_state('known_delisted_tickers', _json.dumps(list(known)))
+                        threading.Thread(
+                            target=_notify,
+                            args=(f'⚠️ 상장폐지 코인 감지: {ticker}\n계좌에 보유 중이나 Upbit에서 거래 불가 상태입니다. 수동 확인 필요.',),
+                            kwargs={'level': 'CRITICAL'},
+                            daemon=True,
+                        ).start()
+                except Exception:
+                    pass
                 continue
             logger.warning('[equity] %s 시세 조회 예외 → avg_buy_price fallback: %s', ticker, _price_exc)
             price = float(avg_cache.get(asset) or 0)
