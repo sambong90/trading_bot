@@ -43,6 +43,12 @@ PARTIAL_STOP_2_ROI_PCT = _float('PARTIAL_STOP_2_ROI_PCT', '-12.0')
 PARTIAL_STOP_2_SELL_PCT = _float('PARTIAL_STOP_2_SELL_PCT', '0.25')
 PARTIAL_STOP_COOLDOWN_MINUTES = _int('PARTIAL_STOP_COOLDOWN_MINUTES', '120')
 
+ROTATION_ENABLED           = _bool('ROTATION_ENABLED', 'true')
+ROTATION_MIN_NEW_ADX       = _float('ROTATION_MIN_NEW_ADX', '35.0')
+ROTATION_ADX_GAP           = _float('ROTATION_ADX_GAP', '15.0')
+ROTATION_MIN_VICTIM_ROI    = _float('ROTATION_MIN_VICTIM_ROI', '1.0')
+ROTATION_COOLDOWN_MINUTES  = _int('ROTATION_COOLDOWN_MINUTES', '120')
+
 TREND_BUY_MIN_VOL_RATIO = _float('TREND_BUY_MIN_VOL_RATIO', '1.0')
 RANGE_BUY_MIN_VOL_RATIO = _float('RANGE_BUY_MIN_VOL_RATIO', '0.8')
 
@@ -54,6 +60,7 @@ TAG_EXEC_SELL = 'EXEC_SELL'
 TAG_CB_SELL = 'CB_SELL'
 TAG_MANUAL_BUY = 'MANUAL_BUY'
 TAG_MANUAL_SELL = 'MANUAL_SELL'
+TAG_ROTATION_SELL = 'ROTATION_SELL'
 
 _BUY_EXEC_TAGS = (TAG_EXEC_BUY, TAG_DCA_BUY, TAG_MANUAL_BUY)
 
@@ -212,6 +219,44 @@ def count_open_positions(executor, tickers: list) -> int:
         return sum(1 for t in tickers if (executor.get_position_qty(t) or 0) > 0)
     except Exception:
         return 0
+
+
+def is_in_rotation_cooldown(ticker: str) -> bool:
+    """True if ROTATION_SELL event within ROTATION_COOLDOWN_MINUTES."""
+    ts = _last_ts_with_tag(ticker, TAG_ROTATION_SELL)
+    if ts is None:
+        return False
+    try:
+        t = ts.timestamp() if hasattr(ts, 'timestamp') else (ts - datetime(1970, 1, 1)).total_seconds()
+        return (datetime.now(timezone.utc).timestamp() - t) < (ROTATION_COOLDOWN_MINUTES * 60)
+    except Exception:
+        return False
+
+
+def get_latest_adx(ticker: str, timeframe: str = 'minute60') -> float:
+    """TechnicalIndicator 최신 행에서 ADX 반환. 조회 실패 시 0.0."""
+    try:
+        from trading_bot.db import get_session
+        from trading_bot.models import TechnicalIndicator
+        session = get_session()
+        try:
+            row = (
+                session.query(TechnicalIndicator)
+                .filter(
+                    TechnicalIndicator.ticker == ticker,
+                    TechnicalIndicator.timeframe == timeframe,
+                )
+                .order_by(TechnicalIndicator.ts.desc())
+                .limit(1)
+                .first()
+            )
+            if row and isinstance(row.indicators, dict):
+                return float(row.indicators.get('adx', 0) or 0)
+            return 0.0
+        finally:
+            session.close()
+    except Exception:
+        return 0.0
 
 
 def log_execution_event(ticker: str, signal: str, tag: str, price: float = None) -> bool:

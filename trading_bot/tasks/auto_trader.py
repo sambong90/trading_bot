@@ -665,6 +665,93 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     return 'hold', reason, None
 
 
+def _try_rotation(executor, tickers: list, new_item: dict) -> bool:
+    """
+    포지션 만석 시 약세 수익 포지션을 매도하고 강세 신규 신호로 교체.
+    성공(매도 완료) 시 True, 조건 불충족 or 실패 시 False.
+    """
+    try:
+        from trading_bot.balanced_plus import (
+            ROTATION_ENABLED, ROTATION_MIN_NEW_ADX, ROTATION_ADX_GAP,
+            ROTATION_MIN_VICTIM_ROI, TAG_ROTATION_SELL,
+            is_in_rotation_cooldown, get_latest_adx, log_execution_event,
+        )
+        from trading_bot.scale_out_manager import get_scale_out_state, get_trailing_high
+    except Exception:
+        return False
+
+    if not ROTATION_ENABLED:
+        return False
+
+    new_adx = float(new_item.get('adx', 0) or 0)
+    if new_adx < ROTATION_MIN_NEW_ADX:
+        return False
+
+    # 교체 후보 수집: 수익 중 + scale-out 미진행 + rotation 쿨다운 아님
+    candidates = []
+    for t in tickers:
+        if t == new_item.get('ticker'):
+            continue
+        qty = executor.get_position_qty(t)
+        if qty <= 0:
+            continue
+        avg = executor.get_avg_buy_price(t) or 0.0
+        try:
+            import pyupbit
+            cur = pyupbit.get_current_price(t)
+            cur = float(cur) if cur else avg
+        except Exception:
+            cur = avg
+        if avg <= 0 or cur <= 0:
+            continue
+        roi = (cur - avg) / avg * 100
+        if roi < ROTATION_MIN_VICTIM_ROI:
+            continue
+        so_stage = get_scale_out_state(t, avg, qty)
+        if so_stage > 0:
+            continue
+        if is_in_rotation_cooldown(t):
+            continue
+        victim_adx = get_latest_adx(t)
+        candidates.append({'ticker': t, 'adx': victim_adx, 'price': cur, 'roi': roi})
+
+    if not candidates:
+        return False
+
+    # 가장 ADX 낮은 포지션을 교체 대상으로 선정
+    victim = min(candidates, key=lambda x: x['adx'])
+    if new_adx - victim['adx'] < ROTATION_ADX_GAP:
+        logger.debug(
+            '[Rotation] 스킵: 신규 ADX(%.1f) - victim ADX(%.1f) = %.1f < 임계값 %.1f',
+            new_adx, victim['adx'], new_adx - victim['adx'], ROTATION_ADX_GAP,
+        )
+        return False
+
+    # 매도 실행
+    victim_ticker = victim['ticker']
+    victim_price = victim['price']
+    try:
+        fill_price = executor.place_order('sell', victim_price, size_pct=1.0, ticker=victim_ticker) or victim_price
+        log_execution_event(victim_ticker, 'sell', TAG_ROTATION_SELL, fill_price)
+        # scale-out 상태 초기화
+        get_scale_out_state(victim_ticker, 0.0, 0.0)
+        logger.info(
+            '🔄 [Rotation] %s 매도(ADX %.1f, ROI %.1f%%) → %s 매수(ADX %.1f)',
+            victim_ticker, victim['adx'], victim['roi'],
+            new_item.get('ticker'), new_adx,
+        )
+        _notify(
+            f'🔄 로테이션: {victim_ticker} 매도(ADX {victim["adx"]:.0f}, ROI {victim["roi"]:+.1f}%)'
+            f' → {new_item.get("ticker")} 매수(ADX {new_adx:.0f})',
+            level='TRADE',
+        )
+        executor.refresh_balance_cache()
+        return True
+    except Exception as e:
+        logger.warning('[Rotation] %s 매도 실패: %s', victim_ticker, e)
+        return False
+
+
 def run_cycle(mode):
     args = parse_args()
     tickers = get_tickers()
@@ -871,6 +958,7 @@ def run_cycle(mode):
             def log_execution_event(*a, **k): pass
             TAG_EXEC_BUY = 'EXEC_BUY'
         buys_executed_this_cycle = 0
+        rotation_done_this_cycle = False
 
         # 정렬: ADX가 높을수록 추세가 강하므로 우선 매수 (내림차순)
         pending_buys_sorted = sorted(pending_buys, key=lambda x: float(x.get('adx', 0) or 0), reverse=True)
@@ -896,9 +984,20 @@ def run_cycle(mode):
                 ai_logger.info('[SKIP] MAX_BUYS_PER_CYCLE reached (%s)', MAX_BUYS_PER_CYCLE)
                 break
             if count_open_positions(executor, tickers) >= MAX_OPEN_POSITIONS:
-                logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달로 매수 중단', MAX_OPEN_POSITIONS)
-                ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached (%s)', MAX_OPEN_POSITIONS)
-                break
+                if not rotation_done_this_cycle and not circuit_breaker_active:
+                    rotated = _try_rotation(executor, tickers, item)
+                    if rotated:
+                        rotation_done_this_cycle = True
+                        remaining_cash = executor.get_available_cash()
+                        # 매도 완료 → 아래 매수 로직으로 낙하
+                    else:
+                        logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달, 로테이션 불가 → 매수 중단', MAX_OPEN_POSITIONS)
+                        ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached, rotation failed')
+                        break
+                else:
+                    logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달로 매수 중단', MAX_OPEN_POSITIONS)
+                    ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached (%s)', MAX_OPEN_POSITIONS)
+                    break
             # [IMPROVED] 연속 손실 4회+ 시 포지션 크기 0 → 매수 스킵
             position_size = float(item.get('position_size', 0) or 0)
             if position_size <= 0:
