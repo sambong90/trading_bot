@@ -19,10 +19,15 @@ except Exception:
 
 
 def main():
+    import time
     from trading_bot.telegram_bot import send_briefing
     ok = send_briefing()
     if not ok:
-        print("Market briefing send failed (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
+        # 1회 재시도 (Telegram API 일시 오류 대응)
+        time.sleep(5)
+        ok = send_briefing()
+    if not ok:
+        print("Market briefing send failed (check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)", file=sys.stderr)
         sys.exit(1)
     print("Market briefing sent.")
 
