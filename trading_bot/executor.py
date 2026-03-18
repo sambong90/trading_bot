@@ -473,7 +473,9 @@ class LiveExecutor:
                     slippage = (realtime_price - price) / price   # 양수 = 실시간이 더 비쌈 (불리)
                 else:
                     slippage = (price - realtime_price) / price   # 양수 = 실시간이 더 쌈 (불리)
-                if slippage > 0.03:  # 불리한 방향으로 3% 이상 괴리 시 주문 거부
+                sell_guard = float(os.environ.get('SLIPPAGE_GUARD_SELL_PCT', '0'))  # 0 = 매도 가드 비활성
+                threshold = sell_guard if side == 'sell' else 0.03
+                if threshold > 0 and slippage > threshold:  # 불리한 방향으로 임계값 이상 괴리 시 주문 거부
                     msg = (f'슬리피지 방어: {ticker} 참조가격({price:,.0f}) vs '
                            f'실시간({realtime_price:,.0f}) 괴리 {slippage*100:.1f}% > 3%')
                     _logger.warning('[SLIPPAGE GUARD] %s', msg)
