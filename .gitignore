@@ -1,5 +1,8 @@
 # Environment (do not commit secrets)
 .env
+.env.bak
+.env.bak2
+*.env.bak*
 
 # Logs and runtime
 logs/
