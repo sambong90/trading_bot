@@ -4,6 +4,10 @@
 .env.bak2
 *.env.bak*
 
+# K8s secrets (실제 값 커밋 방지)
+k8s/secret.yaml
+k8s/*-secret.yaml
+
 # Logs and runtime
 logs/
 *.log
