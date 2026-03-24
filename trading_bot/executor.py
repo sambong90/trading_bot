@@ -609,7 +609,7 @@ class LiveExecutor:
                         }
 
                     try:
-                        self._persist_order({**rec, 'order_id': order_id}, status='submitted')
+                        self._persist_order({**rec, 'order_id': order_id}, status='filled')
                     except Exception:
                         pass
 
