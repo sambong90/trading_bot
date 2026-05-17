@@ -221,6 +221,39 @@ class ExecutionEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class AiEvent(Base):
+    """전략 판단·매매 액션 이벤트 — ai_analysis.jsonl 대체 DB 저장소.
+
+    event 유형: STRATEGY | EXECUTE | SKIP | ERROR | STOP_LOSS | DCA | SCALE_OUT
+    보존 기간: 30일 (db_maintenance.py에서 자동 정리)
+    """
+    __tablename__ = 'ai_events'
+    __table_args__ = (
+        Index('idx_ai_events_ticker_ts', 'ticker', 'ts'),
+        Index('idx_ai_events_event_ts', 'event', 'ts'),
+    )
+    id = Column(Integer, primary_key=True)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    event = Column(String(32), nullable=False)
+    ticker = Column(String(32))
+    signal = Column(String(16))
+    price = Column(Float)
+    avg_buy_price = Column(Float)
+    roi_pct = Column(Float)
+    regime = Column(String(32))
+    timeframe = Column(String(16))
+    adx = Column(Float)
+    rsi = Column(Float)
+    atr = Column(Float)
+    vol_ratio = Column(Float)
+    position_size_krw = Column(Float)
+    size_pct = Column(Float)
+    decision_reason = Column(Text)
+    api_status = Column(String(16))
+    extra = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class MacroSnapshot(Base):
     """거시 지표 일봉 스냅샷 — L1 글로벌 필터(G-01~G-15) 평가용.
 

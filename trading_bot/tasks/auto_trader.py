@@ -31,12 +31,13 @@ LOG_DIR = ROOT / 'trading_bot' / 'logs'
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / 'auto_trader.log'
 
+from logging.handlers import RotatingFileHandler as _RFH
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        _RFH(LOG_FILE, maxBytes=20 * 1024 * 1024, backupCount=3, encoding='utf-8'),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -55,7 +56,8 @@ _has_ai_handler = any(
     for h in getattr(ai_logger, 'handlers', [])
 )
 if not _has_ai_handler:
-    _fh = logging.FileHandler(_ai_log_file, encoding='utf-8')
+    from logging.handlers import RotatingFileHandler as _RFH2
+    _fh = _RFH2(_ai_log_file, maxBytes=10 * 1024 * 1024, backupCount=2, encoding='utf-8')
     _fh.setFormatter(logging.Formatter(fmt='%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
     ai_logger.addHandler(_fh)
     ai_logger.setLevel(logging.INFO)
@@ -481,12 +483,12 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
         _pr = PatternRecognizer(df, timeframe=DEFAULT_INTERVAL)
         _signals = _pr.evaluate()
         for _ps in _signals:
-            ai_logger.info('[PATTERN] %s | %s | strength=%.2f | %s',
-                           ticker, str(_ps), _ps.strength, _ps.meta)
+            ai_logger.debug('[PATTERN] %s | %s | strength=%.2f | %s',
+                            ticker, str(_ps), _ps.strength, _ps.meta)
         if _pr.fib and current_price:
-            ai_logger.info('[FIB] %s | zone=%s chain=%s',
-                           ticker, _pr.fib.zone(current_price),
-                           _pr.fib.active_chain(current_price))
+            ai_logger.debug('[FIB] %s | zone=%s chain=%s',
+                            ticker, _pr.fib.zone(current_price),
+                            _pr.fib.active_chain(current_price))
     except Exception as _pe:
         logger.debug('[PatternRecognizer] %s 실패 (무시): %s', ticker, _pe)
 

@@ -47,7 +47,8 @@ SCHED_LOG_FILE = LOG_DIR / 'scheduler_out.log'
 _sched_logger = logging.getLogger('scheduler')
 _sched_logger.setLevel(logging.INFO)
 if not _sched_logger.handlers:
-    _fh = logging.FileHandler(SCHED_LOG_FILE, encoding='utf-8')
+    from logging.handlers import RotatingFileHandler as _RFHS
+    _fh = _RFHS(SCHED_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=2, encoding='utf-8')
     _fh.setFormatter(logging.Formatter(
         '%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',

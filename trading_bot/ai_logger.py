@@ -6,22 +6,23 @@ AI 전용 분석 로그 — LLM 검증 및 자가 진화(Self-evolving) 평가�
   - trading_bot/logs/ai_debug.log    (기존 파이프 구분 포맷 — 하위 호환)
   - trading_bot/logs/ai_analysis.jsonl (JSON Lines — AI 파싱 최적화)
 """
-import json
 import logging
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # trading_bot/logs 경로
 _LOGS_DIR = Path(__file__).resolve().parent / 'logs'
 _LOGS_DIR.mkdir(parents=True, exist_ok=True)
 _AI_LOG_FILE = _LOGS_DIR / 'ai_debug.log'
-_AI_JSONL_FILE = _LOGS_DIR / 'ai_analysis.jsonl'
 
-# --- 기존 파이프 구분 텍스트 로거 (하위 호환) ---
+# --- 파이프 구분 텍스트 로거 (SKIP/EXIT/EXECUTE 등 중요 이벤트용, 10MB×2 rotation) ---
 ai_logger = logging.getLogger('trading_bot.ai')
 ai_logger.setLevel(logging.INFO)
 if not ai_logger.handlers:
-    _handler = logging.FileHandler(_AI_LOG_FILE, encoding='utf-8')
+    _handler = RotatingFileHandler(
+        _AI_LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=2, encoding='utf-8'
+    )
     _handler.setLevel(logging.INFO)
     _handler.setFormatter(logging.Formatter(
         fmt='%(asctime)s | %(message)s',
@@ -97,13 +98,39 @@ def log_ai_event(
     # None 값 제거 (JSONL 파일 크기 최적화)
     record = {k: v for k, v in record.items() if v is not None}
 
+    # DB 저장 (primary — ai_events 테이블)
     try:
-        with open(_AI_JSONL_FILE, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + '\n')
+        from trading_bot.db import get_session
+        from trading_bot.models import AiEvent
+        session = get_session()
+        try:
+            session.add(AiEvent(
+                ts=datetime.now(timezone.utc),
+                event=event_type,
+                ticker=ticker,
+                signal=signal,
+                price=price,
+                avg_buy_price=avg_buy_price,
+                roi_pct=round(roi, 2) if roi is not None else None,
+                regime=regime,
+                timeframe=timeframe,
+                adx=round(adx, 1) if adx is not None else None,
+                rsi=round(rsi, 1) if rsi is not None else None,
+                atr=round(atr, 2) if atr is not None else None,
+                vol_ratio=round(vol_ratio, 2) if vol_ratio is not None else None,
+                position_size_krw=round(position_size, 0) if position_size is not None else None,
+                size_pct=round(size_pct, 4) if size_pct is not None else None,
+                decision_reason=decision_reason,
+                api_status=api_status,
+                extra=extra,
+            ))
+            session.commit()
+        finally:
+            session.close()
     except Exception:
         pass
 
-    # 기존 파이프 구분 로거에도 기록 (하위 호환)
+    # 텍스트 로거 (중요 이벤트 요약)
     try:
         ai_logger.info(
             "[%s] %s | Signal:%s | Price:%s | Regime:%s | ADX:%s | RSI:%s",

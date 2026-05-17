@@ -41,6 +41,7 @@ def prune_old_data():
         TechnicalIndicator,
         EquityPoint,
         TuningRun,
+        AiEvent,
     )
 
     now = datetime.utcnow()
@@ -92,6 +93,10 @@ def prune_old_data():
             deleted_tr = 0
         logger.info('prune TuningRun: %s rows (older than 30d, latest record kept)', deleted_tr)
 
+        # AiEvent: 30일 초과 삭제
+        deleted_ai = session.query(AiEvent).filter(AiEvent.ts < cutoff_30d).delete(synchronize_session=False)
+        logger.info('prune AiEvent: %s rows (older than 30d)', deleted_ai)
+
         session.commit()
         return {
             'ticker_snapshots': deleted_snap,
@@ -100,6 +105,7 @@ def prune_old_data():
             'technical_indicators': deleted_tech,
             'equity_points': deleted_eq,
             'tuning_runs': deleted_tr,
+            'ai_events': deleted_ai,
         }
     except Exception as e:
         session.rollback()
