@@ -2,7 +2,7 @@
 
 collect_all()     : MacroCollector + DominanceCollector + KimpCollector 순차 실행.
 get_market_context() : DB 최신값 통합 → L1/L2 평가에 필요한 단일 dict 반환.
-validate_freshness()  : ratio_quality 체크 — 'stale' 시 EM-7 트리거 차단.
+validate_freshness()  : 데이터 나이 체크 — 평일 26h / 주말 72h 초과 시 EM-7 차단.
 
 MarketContext 구조:
   {
@@ -10,17 +10,45 @@ MarketContext 구조:
     'dominance':   dict | None,   # DominanceSnapshot 최신
     'kimp':        dict | None,   # KimpSnapshot 최신
     'btc_weekly_200_above': bool, # BTC 현재가 > 주봉 200MA
-    'is_tradeable': bool,         # ratio_quality='fresh' AND 필수 데이터 존재
+    'is_tradeable': bool,         # 데이터 존재 AND 나이 임계값 이내
     'block_reasons': list[str],   # 트레이딩 차단 이유 목록
   }
 """
 import logging
+from datetime import datetime, timezone, timedelta
 
 from trading_bot.collectors import macro as _macro
 from trading_bot.collectors import dominance as _dominance
 from trading_bot.collectors import kimp as _kimp
 
 logger = logging.getLogger(__name__)
+
+_KST = timezone(timedelta(hours=9))
+_STALE_HOURS_WEEKDAY = 26   # 평일: 24h 수집 주기 + 2h 여유
+_STALE_HOURS_WEEKEND = 72   # 주말: 금요일 데이터로 토~일 전체 커버
+
+
+def _is_weekend_kst() -> bool:
+    """KST 기준 주말 여부 (토=5, 일=6)."""
+    return datetime.now(_KST).weekday() >= 5
+
+
+def _macro_age_hours(macro: dict) -> float:
+    """macro['ts'] 기준 현재까지 경과 시간(h). 파싱 실패 시 inf 반환."""
+    ts = macro.get('ts')
+    if ts is None:
+        return float('inf')
+    try:
+        import pandas as pd
+        ts_pd = pd.Timestamp(ts)
+        if ts_pd.tzinfo is None:
+            ts_pd = ts_pd.tz_localize('UTC')
+        else:
+            ts_pd = ts_pd.tz_convert('UTC')
+        now_utc = datetime.now(timezone.utc)
+        return (now_utc - ts_pd.to_pydatetime()).total_seconds() / 3600
+    except Exception:
+        return float('inf')
 
 
 def collect_all(run_macro: bool = True,
@@ -71,8 +99,8 @@ def get_market_context() -> dict:
     """DB 최신 스냅샷 로드 + BTC 주봉200MA 계산 후 MarketContext dict 반환.
 
     is_tradeable=False 조건:
-      - macro.ratio_quality == 'stale'   (EM-7: 주말 데이터로 트리거 금지)
-      - macro 또는 dominance 데이터 없음
+      - macro 데이터 없음, 또는 나이 > 임계값 (평일 26h / 주말 72h)
+      - dominance 데이터 없음
     """
     macro     = _macro.get_latest()
     dominance = _dominance.get_latest()
@@ -86,9 +114,15 @@ def get_market_context() -> dict:
     if macro is None:
         block_reasons.append('MACRO_DATA_MISSING')
         is_tradeable = False
-    elif macro.get('ratio_quality') == 'stale':
-        block_reasons.append('RATIO_STALE_EM7')
-        is_tradeable = False
+    else:
+        weekend = _is_weekend_kst()
+        threshold = _STALE_HOURS_WEEKEND if weekend else _STALE_HOURS_WEEKDAY
+        age_h = _macro_age_hours(macro)
+        if age_h > threshold:
+            block_reasons.append('RATIO_STALE_EM7')
+            is_tradeable = False
+        elif weekend:
+            logger.info('[GUARDIAN] Weekend Mode Active - Using last known macro data (age=%.1fh)', age_h)
 
     if dominance is None:
         block_reasons.append('DOMINANCE_DATA_MISSING')
