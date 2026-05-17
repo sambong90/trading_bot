@@ -28,7 +28,7 @@ def get_consecutive_losses() -> int:
                 entry_price = float(raw.get('entry_price', 0) or 0)
                 sell_price = float(r.price or 0)
                 if entry_price <= 0:
-                    break
+                    continue  # entry_price 미기록 행은 스킵 (streak 유지)
                 if sell_price < entry_price:
                     consecutive += 1
                 else:
@@ -51,13 +51,17 @@ def get_win_rate(lookback: int = 20) -> float:
             if not rows:
                 return 0.5
             wins = 0
+            valid = 0
             for r in rows:
                 raw = r.raw if isinstance(r.raw, dict) else {}
                 entry_price = float(raw.get('entry_price', 0) or 0)
                 sell_price = float(r.price or 0)
-                if entry_price > 0 and sell_price >= entry_price:
+                if entry_price <= 0:
+                    continue  # entry_price 미기록 행은 분모/분자 모두 제외
+                valid += 1
+                if sell_price >= entry_price:
                     wins += 1
-            return wins / len(rows)
+            return wins / valid if valid > 0 else 0.5
         finally:
             session.close()
     except Exception:

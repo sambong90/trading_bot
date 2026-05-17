@@ -321,7 +321,7 @@ def compute_total_account_equity(executor, tickers):
     stale_assets = []
     for asset, (cost_krw, bought_at) in list(_pending_buy_costs.items()):
         age = now_ts - bought_at
-        if age > 300:  # 5분 초과 → 정산 완료로 간주, 제거
+        if age > 30:  # 30초 초과 → 정산 완료로 간주, 제거 (Upbit SLA 1~2초)
             stale_assets.append(asset)
             continue
         qty_in_cache = float(cache.get(asset) or 0)
@@ -433,6 +433,21 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     best_params = get_best_params()
     adx_trend_threshold = float(best_params.get('adx_trend_threshold', 25.0))
     macro_ema_long = int(best_params.get('macro_ema_long', 50))
+
+    # ── PatternRecognizer: 관찰 모드 (패턴 로그만, 매매 로직 무영향) ──────────
+    try:
+        from trading_bot.pattern_recognizer import PatternRecognizer
+        _pr = PatternRecognizer(df, timeframe=DEFAULT_INTERVAL)
+        _signals = _pr.evaluate()
+        for _ps in _signals:
+            ai_logger.info('[PATTERN] %s | %s | strength=%.2f | %s',
+                           ticker, str(_ps), _ps.strength, _ps.meta)
+        if _pr.fib and current_price:
+            ai_logger.info('[FIB] %s | zone=%s chain=%s',
+                           ticker, _pr.fib.zone(current_price),
+                           _pr.fib.active_chain(current_price))
+    except Exception as _pe:
+        logger.debug('[PatternRecognizer] %s 실패 (무시): %s', ticker, _pe)
 
     try:
         result = generate_comprehensive_signal_with_logging(
@@ -888,16 +903,59 @@ def run_cycle(mode):
     except Exception as e:
         logger.warning('[CIRCUIT BREAKER] 체크 중 오류 (계속 진행): %s', e)
 
-    # ----- BTC 거시 장세 필터: 1회 조회 후 이번 사이클 매수 허용 여부 결정 -----
+    # ----- MarketGuardian: L1 글로벌 필터 + L2 장세 분류 (core_logic_distilled.md) -----
+    guardian_result = None
+    try:
+        from trading_bot.market_guardian import MarketGuardian
+        guardian_result = MarketGuardian().evaluate()
+
+        if not guardian_result.tradeable:
+            # 데이터 미비(Stale/Missing) 또는 P1 차단
+            sell_blocked = 'SELL_BLOCKED' in guardian_result.flags
+            logger.warning(
+                '[L1] 매매 차단 — 이유: %s | sell_blocked=%s',
+                guardian_result.block_reasons, sell_blocked,
+            )
+            if sell_blocked:
+                # G-02 SUPER_CRISIS: 매도까지 차단 → 사이클 전체 스킵
+                logger.warning('[L1] G-02 SUPER_CRISIS — 사이클 전체 스킵 (매도 포함)')
+                return
+        else:
+            logger.info(
+                '[Guardian] regime=%s cap=%.0f%% new_entry=%s alt_block=%s size_mult=%.1f%s',
+                guardian_result.regime,
+                guardian_result.position_cap * 100,
+                guardian_result.allow_new_entry,
+                guardian_result.block_alt_buys,
+                guardian_result.buy_size_multiplier,
+                f' flags={guardian_result.flags}' if guardian_result.flags else '',
+            )
+    except Exception as _ge:
+        # Guardian 자체 예외 → 보수적으로 기존 BTC EMA 필터만 적용 (서비스 중단 방지)
+        logger.warning('[Guardian] 평가 중 예외 발생 (기존 필터로 폴백): %s', _ge)
+        guardian_result = None
+
+    # ----- BTC 거시 장세 필터: Guardian 결과 반영 또는 기존 로직 폴백 -----
     from trading_bot.param_manager import get_best_params as _get_best_params_cycle
     _cycle_params = _get_best_params_cycle()
-    _macro_ema_long = int(_cycle_params.get('macro_ema_long', 50))
-    # check_btc_global_trend은 ema_short(20) vs ema_long(50) 고정 사용.
-    # macro_ema_long은 strategy.py 단일 EMA 필터 전용이므로 여기서 넘기면
-    # macro_ema_long < ema_short(20) 시 단기/장기 역전으로 오판 발생.
-    is_global_bull_market = check_btc_global_trend(interval='day', count=60)
+    # check_btc_global_trend은 ema_short(5) vs ema_long(20) 고정 사용.
+    # macro_ema_long은 strategy.py 단일 EMA 필터 전용이므로 여기서 사용하지 않음.
+    if guardian_result is not None and guardian_result.tradeable:
+        # Guardian이 정상 평가한 경우: regime으로 매수 허용 여부 결정
+        is_global_bull_market = guardian_result.regime not in ('BEAR_CONFIRMED', 'BEAR_WARNING')
+        if not guardian_result.allow_new_entry:
+            is_global_bull_market = False
+    elif guardian_result is not None and not guardian_result.tradeable:
+        # P1 차단 (단, SUPER_CRISIS는 위에서 이미 return)
+        is_global_bull_market = False
+    else:
+        # Guardian 예외 폴백: 기존 EMA 필터
+        is_global_bull_market = check_btc_global_trend(interval='day', count=60)
+
     if not is_global_bull_market:
-        logger.info('🚨 BTC 하락 추세 감지: 이번 사이클은 신규 매수(Buy)를 전면 차단하고 매도(Sell)만 수행합니다.')
+        logger.info('🚨 매수 전면 차단: 이번 사이클은 매도(Sell)만 수행합니다. '
+                    '(regime=%s)',
+                    guardian_result.regime if guardian_result else 'UNKNOWN')
 
     # ----- Fear & Greed Index: 1회 조회 후 이번 사이클 매수 사이징에 반영 -----
     fng_value = 50

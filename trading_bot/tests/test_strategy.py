@@ -325,14 +325,53 @@ class TestPanicDipBuy:
         assert signal == 'hold'
 
     @patch('trading_bot.config.FNG_EXTREME_FEAR', 20)
-    def test_panic_dip_buy_reason_tag(self):
-        """Verify Panic Dip-Buy decision_reason contains expected tag."""
-        # The Panic Dip-Buy logic is in generate_comprehensive_signal_with_logging
-        # which requires full DB setup. We verify the tag format instead.
-        tag = 'Panic Dip-Buy (MTF Bypassed due to Extreme Fear, FNG=15): RSI(25.0) <= 30'
-        assert 'Panic Dip-Buy' in tag
-        assert 'MTF Bypassed' in tag
-        assert 'Extreme Fear' in tag
+    @patch('trading_bot.strategy._persist_signal_and_analysis')
+    @patch('trading_bot.risk.calculate_adjusted_position_size')
+    @patch('trading_bot.data_manager.load_ohlcv_from_db')
+    @patch('trading_bot.data_manager.load_higher_timeframe_indicators')
+    @patch('trading_bot.strategy.load_cached_indicators')
+    def test_panic_dip_buy_rsi_trigger(
+        self, mock_load_ind, mock_htf, mock_ohlcv, mock_calc_size, mock_persist
+    ):
+        """Panic Dip-Buy: MTF blocked + FNG=15 + RSI=25 → buy signal bypasses MTF block."""
+        import pandas as pd
+        from datetime import datetime
+        from trading_bot.strategy import generate_comprehensive_signal_with_logging
+
+        def _row(ts, ema_s=100.0, ema_l=90.0):
+            return dict(
+                ema_short=ema_s, ema_long=ema_l, adx=35.0, bb_width=0.06,
+                atr=500.0, atr_raw=500.0, rsi=25.0, volume=1_000_000.0,
+                volume_ma=800_000.0, bb_lower=45000.0, bb_upper=55000.0,
+                bb_middle=50000.0, obv=0.0, obv_sma=1.0, time=ts,
+            )
+
+        df = pd.DataFrame([
+            _row(datetime(2025, 12, 31, 22, 0), ema_s=88.0, ema_l=92.0),
+            _row(datetime(2025, 12, 31, 23, 0), ema_s=89.0, ema_l=91.0),
+            _row(datetime(2026, 1, 1, 0, 0)),
+            _row(datetime(2026, 1, 1, 1, 0)),  # live (iloc[-1])
+        ])
+        mock_load_ind.return_value = df
+        mock_htf.return_value = {
+            'is_uptrend': False, 'timeframe': 'day',
+            'current_price': 48000.0, 'ema_long': 50000.0, 'ema_period': 50,
+        }
+        mock_ohlcv.return_value = pd.DataFrame()
+        mock_calc_size.return_value = (1.0, {'position_size_multiplier': 1.0, 'is_defensive_mode': False})
+        mock_persist.side_effect = lambda *args, **kwargs: (args[4], args[6])
+
+        result = generate_comprehensive_signal_with_logging(
+            'KRW-DOGE',
+            current_price=50000.0,
+            is_global_bull_market=True,
+            position_qty=0.0,
+            fng_value=15,
+        )
+
+        assert result['signal'] == 'buy'
+        assert 'Panic Dip-Buy' in result['decision_reason']
+        assert 'RSI' in result['decision_reason']
 
     def test_panic_dip_buy_size_override_config(self):
         """PANIC_DIP_BUY_SIZE_PCT config defaults to 0.3."""

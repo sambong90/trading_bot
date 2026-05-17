@@ -29,3 +29,9 @@ python-dotenv
 
 # --- AI Reviewer ---
 openai>=1.0.0
+
+# --- Macro Data Collector ---
+yfinance>=0.2.40
+
+# --- Research / Scraper ---
+beautifulsoup4>=4.12.0

@@ -289,6 +289,80 @@ def run_trading_cycle() -> None:
 # 서브태스크
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 데이터 수집 Job (collectors 패키지)
+# ---------------------------------------------------------------------------
+
+def collect_macro() -> None:
+    """거시 지표 수집 (Yahoo Finance: DXY, NDX, Gold, Bond, JPY, Oil).
+
+    실행 주기: 매일 KST 07:00 — NYSE 정규장 종가 확정 후.
+    MacroSnapshot → DB 저장. ratio_quality='stale'이면 EM-7 트리거 차단.
+    """
+    _log('[수집] collect_macro 실행')
+    try:
+        from trading_bot.collectors import macro as _macro
+        result = _macro.collect()
+        if result:
+            _log(
+                f'[수집] MacroSnapshot 완료 — '
+                f'ratio={result.get("nasdaq_dxy_ratio","?"):.1f} '
+                f'zone={result.get("nasdaq_dxy_zone","?")} '
+                f'quality={result.get("ratio_quality","?")}'
+            )
+        else:
+            _log('[수집] collect_macro 실패 (None 반환)', 'warning')
+    except Exception as e:
+        _log(f'[수집] collect_macro 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_macro] 오류: {e}')
+
+
+def collect_dominance() -> None:
+    """BTC/ETH 도미넌스 수집 (CoinGecko /global).
+
+    실행 주기: 0,4,8,12,16,20시 (4h 캔들 마감 직후).
+    DominanceSnapshot → DB 저장. event_signal로 임계값 크로스 감지.
+    """
+    _log('[수집] collect_dominance 실행')
+    try:
+        from trading_bot.collectors import dominance as _dom
+        result = _dom.collect()
+        if result:
+            _log(
+                f'[수집] DominanceSnapshot 완료 — '
+                f'BTC.D={result.get("btc_dominance","?"):.2f}% '
+                f'stage={result.get("bull_stage","?")} '
+                f'event={result.get("event_signal") or "none"}'
+            )
+        else:
+            _log('[수집] collect_dominance 실패 (None 반환)', 'warning')
+    except Exception as e:
+        _log(f'[수집] collect_dominance 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_dominance] 오류: {e}')
+
+
+def collect_kimp() -> None:
+    """김치프리미엄 수집 (Upbit + Binance REST).
+
+    실행 주기: 매시 auto_trader 직전 (CANDLE_SYNC_OFFSET_SEC 기반).
+    KimpSnapshot → DB 저장. kimp_signal로 역프/바닥 신호 감지.
+    """
+    _log('[수집] collect_kimp 실행')
+    try:
+        from trading_bot.collectors import kimp as _kimp
+        result = _kimp.collect()
+        if result:
+            _log(
+                f'[수집] KimpSnapshot 완료 — '
+                f'kimp={result.get("kimp_pct","?"):.2f}% '
+                f'signal={result.get("kimp_signal","?")}'
+            )
+        else:
+            _log('[수집] collect_kimp 실패 (None 반환)', 'warning')
+    except Exception as e:
+        _log(f'[수집] collect_kimp 예외: {e}', 'error')
+
+
 def run_db_maintenance() -> None:
     """DB 하우스키핑(Pruning): 오래된 데이터 삭제. 매일 1회 실행."""
     _log('[스케줄러] db_maintenance 실행')
@@ -413,6 +487,26 @@ if os.environ.get('ENABLE_AUTO_TRADING', '0') == '1':
     _log(f'   -> 1h봉 마감 {_offset_sec}초 후 시작, 이후 1분마다 반복 (CANDLE_SYNC_OFFSET_SEC={_offset_sec})')
 else:
     _log('자동 매매 비활성화 (ENABLE_AUTO_TRADING=1로 설정하여 활성화)')
+
+# ── 데이터 수집 Job ─────────────────────────────────────────────────────────
+
+# 거시 지표 수집: 매일 KST 07:00 (NYSE 종가 확정 후)
+sched.add_job(collect_macro, 'cron', hour=7, minute=0, id='collect_macro',
+              misfire_grace_time=300)
+_log('거시 지표 수집 스케줄 등록 (매일 07:00 KST — Yahoo Finance)')
+
+# 도미넌스 수집: 4h 주기 (0,4,8,12,16,20시) — 4h 캔들 마감 직후
+sched.add_job(collect_dominance, 'cron', hour='0,4,8,12,16,20', minute=2,
+              id='collect_dominance', misfire_grace_time=120)
+_log('도미넌스 수집 스케줄 등록 (4h 주기 — CoinGecko)')
+
+# 김치프리미엄 수집: 매시 auto_trader 직전 (_cron_minute - 1분, 최소 0분)
+_kimp_minute = max(0, _cron_minute - 1)
+sched.add_job(collect_kimp, 'cron', minute=_kimp_minute, second=0,
+              id='collect_kimp', misfire_grace_time=60)
+_log(f'김프 수집 스케줄 등록 (매시 {_kimp_minute:02d}분 — auto_trader 직전)')
+
+# ── 기존 유지보수 Job ────────────────────────────────────────────────────────
 
 # DB 하우스키핑: 매일 새벽 3시 (용량·조회 속도 유지)
 sched.add_job(run_db_maintenance, 'cron', hour=3, minute=0, id='db_maintenance')

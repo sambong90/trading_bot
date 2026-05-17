@@ -220,3 +220,126 @@ class ExecutionEvent(Base):
     meta = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class MacroSnapshot(Base):
+    """거시 지표 일봉 스냅샷 — L1 글로벌 필터(G-01~G-15) 평가용.
+
+    수집 주기: 매일 KST 07:00 (NYSE 정규장 종가 확정 후)
+    ratio_quality='stale' 시 EM-7 규칙에 따라 트리거 실행 금지.
+
+    Migration:
+      PostgreSQL: CREATE TABLE macro_snapshots (...) — create_all()로 자동 생성.
+      컬럼 추가 시: ALTER TABLE macro_snapshots ADD COLUMN <name> <type>;
+    """
+    __tablename__ = 'macro_snapshots'
+    __table_args__ = (
+        UniqueConstraint('ts', name='u_macro_ts'),
+        Index('idx_macro_ts', 'ts'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    # ── Raw values (Yahoo Finance 종가) ──────────────────────────────
+    dxy_value = Column(Float)           # ^DXY
+    nasdaq_value = Column(Float)        # ^NDX
+    gold_value = Column(Float)          # GC=F
+    us10y_yield = Column(Float)         # ^TNX (%)
+    us30y_yield = Column(Float)         # ^TYX (%)
+    usdjpy_value = Column(Float)        # USDJPY=X
+    oil_value = Column(Float)           # CL=F
+
+    # ── 1d 변동률 (%) ────────────────────────────────────────────────
+    dxy_1d_pct = Column(Float)
+    nasdaq_1d_pct = Column(Float)
+    gold_1d_pct = Column(Float)
+    usdjpy_1d_pct = Column(Float)
+
+    # ── 교환비 (nasdaq_composite / dxy) ─────────────────────────────
+    # 기준: master_strategy_filtered.md Section 50+196
+    # NEUTRAL=215~244(1:230), NORMAL=245~364, ELEVATED=365~439,
+    # BUBBLE=440~559, EXTREME_BUBBLE≥560
+    nasdaq_dxy_ratio = Column(Float)
+    nasdaq_dxy_zone = Column(String)    # LOW|NEUTRAL|NORMAL|ELEVATED|BUBBLE|EXTREME_BUBBLE
+
+    # ── 채권 신호 ────────────────────────────────────────────────────
+    bond_ratio = Column(Float)          # us10y / us30y (역전 감지)
+    bond_signal = Column(String)        # BULL_MARKET|BEAR_MARKET_1|SECONDARY_DROP_IMMINENT
+
+    # ── 위기 복합 신호 ───────────────────────────────────────────────
+    dxy_zone = Column(String)           # DXY_GREEN_ZONE|NEUTRAL|WEAK (G-01)
+    gold_crisis_signal = Column(String) # SEVERE_CRISIS|PRE_CRISIS|NORMAL (G-13)
+    crisis_level = Column(String)       # SUPER_CRISIS|PRE_CRISIS|NORMAL (G-02, dxy_gold_nasdaq)
+    jpy_signal = Column(String)         # ASIA_INSTABILITY|STABLE (G-12)
+    oil_vol_active = Column(Boolean, default=False)  # G-07
+
+    # ── 데이터 품질 ──────────────────────────────────────────────────
+    ratio_quality = Column(String, default='fresh')  # fresh|stale (EM-7)
+    data_source = Column(String, default='yahoo_finance')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class DominanceSnapshot(Base):
+    """BTC 도미넌스 4h 스냅샷 — L2 장세 분류(R-09~R-16) 평가용.
+
+    수집 주기: 매 4시간 (APScheduler)
+    event_signal: 직전 snapshot 대비 임계값 크로스 여부 — dominance_event_signal() 구현 핵심.
+
+    Migration: create_all()로 자동 생성.
+    """
+    __tablename__ = 'dominance_snapshots'
+    __table_args__ = (
+        UniqueConstraint('ts', 'timeframe', name='u_dominance_ts_tf'),
+        Index('idx_dominance_ts', 'ts'),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+    timeframe = Column(String, default='4h')  # 4h|1d
+
+    # ── Raw dominance (%) ────────────────────────────────────────────
+    btc_dominance = Column(Float)       # e.g., 55.20
+    eth_dominance = Column(Float)       # e.g., 12.10
+    alt_dominance = Column(Float)       # = 100 - btc - eth
+
+    # ── 갭 계산 (양수=임계값 위, 음수=하향 돌파) ─────────────────────
+    # 임계값 출처: core_logic_distilled.md R-09~R-16, X-05
+    gap_to_63_75 = Column(Float)        # ALT_ENTRY_CONFIRMED (R-13)
+    gap_to_60_00 = Column(Float)        # BULL_FULLY_CONFIRMED (R-12)
+    gap_to_58_85 = Column(Float)        # BULL_START_TRIGGER (R-09)
+    gap_to_50_00 = Column(Float)        # ALT_MASSACRE 기준 (G-14)
+    gap_to_41_55 = Column(Float)        # DOM_REVERSAL_UP / ALT EXIT (X-05)
+    gap_to_40_00 = Column(Float)        # BULL_CLIMAX_ZONE (R-15)
+
+    # ── 단계 분류 ────────────────────────────────────────────────────
+    bull_stage = Column(String)         # NO_BULL|BULL_WATCHING|BULL_EARLY|BULL_CONFIRMED|BULL_CLIMAX_ZONE
+    event_signal = Column(String)       # 직전 snapshot 대비 크로스 이벤트 (None 가능)
+    # BULL_START_TRIGGER|BULL_FULLY_CONFIRMED|ALT_ENTRY_CONFIRMED|DOM_REVERSAL_UP
+
+    data_source = Column(String, default='coingecko')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class KimpSnapshot(Base):
+    """김치프리미엄 실시간 스냅샷 — E-04/E-11/E-20 kimp_signal() 평가용.
+
+    수집 주기: 매 거래 사이클 (60분)
+    kimp_pct = ((btc_krw / (btc_usd × usdkrw)) - 1) × 100
+
+    Migration: create_all()로 자동 생성.
+    """
+    __tablename__ = 'kimp_snapshots'
+    __table_args__ = (Index('idx_kimp_ts', 'ts'),)
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    # ── Raw prices ───────────────────────────────────────────────────
+    btc_krw = Column(Float)             # Upbit KRW-BTC 현재가
+    btc_usd = Column(Float)             # Binance BTC/USDT 현재가
+    usdkrw = Column(Float)              # USD/KRW 환율
+
+    # ── 파생 지표 ────────────────────────────────────────────────────
+    kimp_pct = Column(Float)            # 김치프리미엄 %
+    kimp_signal = Column(String)        # KOREAN_REVERSE_PREMIUM_BUY|BOTTOM_LIKELY|NEUTRAL|PREMIUM
+
+    data_source = Column(String, default='upbit_binance')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
