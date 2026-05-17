@@ -519,6 +519,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             )
             if _exit.urgency == 'hard':
                 logger.warning('[HARD STOP] %s | %s', ticker, _exit.reason)
+                _pos_value = current_price * float(position_qty or 0)
+                if _pos_value < MIN_ORDER_KRW:
+                    logger.warning('[HARD STOP] %s | 포지션 %.0f원 < 최소주문금액, 매도 스킵 후 피크 초기화', ticker, _pos_value)
+                    reset_trailing_peak(ticker)
+                    return 'hold', _exit.reason, None
                 ai_logger.info('[EXIT:HARD] %s | reason=%s', ticker, _exit.reason)
                 executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker)
                 reset_trailing_peak(ticker)

@@ -19,6 +19,22 @@ from trading_bot.models import OHLCV
 # 거래대금 상위 N개만 순회 (TICKERS 미설정 시). API 호출 최소화·사이클 시간 단축용
 DEFAULT_TOP_N_BY_TRADE_PRICE = 60
 
+_STABLE_BLACKLIST = frozenset({'KRW-USDT', 'KRW-USDC', 'KRW-USDE', 'KRW-USDS', 'KRW-USD1'})
+
+
+def _filter_tickers(tickers):
+    """스테이블코인·상폐 티커 제거."""
+    import json as _json
+    result = [t for t in tickers if t not in _STABLE_BLACKLIST]
+    try:
+        from trading_bot.risk import get_system_state as _gss
+        _known_del = set(_json.loads(_gss('known_delisted_tickers', '[]') or '[]'))
+        if _known_del:
+            result = [t for t in result if t not in _known_del]
+    except Exception:
+        pass
+    return result
+
 
 def get_all_krw_tickers(use_db_fallback=True):
     """KRW 마켓 티커 목록 반환.
@@ -61,7 +77,7 @@ def get_all_krw_tickers(use_db_fallback=True):
         sorted_list = sorted(raw_list, key=_trade_price_24h, reverse=True)
         tickers = [x.get('market') for x in sorted_list[:top_n] if x.get('market')]
         if tickers:
-            return tickers
+            return _filter_tickers(tickers)
     except Exception as e:
         if use_db_fallback:
             pass
@@ -75,7 +91,7 @@ def get_all_krw_tickers(use_db_fallback=True):
             session.close()
             tickers = [r[0] for r in rows if r[0] and r[0].startswith('KRW-')]
             if tickers:
-                return sorted(set(tickers))[:top_n]
+                return _filter_tickers(sorted(set(tickers))[:top_n])
         except Exception:
             pass
     return ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL']
