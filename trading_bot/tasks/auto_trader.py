@@ -335,10 +335,11 @@ def compute_total_account_equity(executor, tickers):
 
 
 def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global_bull_market,
-                           ticker=None, fng_value=50):  # fng_value kept for backward compat, unused
+                           ticker=None, fng_value=50,
+                           guardian_result=None, high_conviction=False):
     """
     Regime-Dependent Dynamic Position Sizing (Risk Parity + Volatility Targeting).
-    FNG 조정은 제거됨 — Panic Dip-Buy는 Pass 2에서 별도 처리.
+    Phase 4: guardian_result.position_cap 기반 exposure 상한 + conviction booster 적용.
     반환: (final_buy_krw, risk_pct, sl_distance)
     """
     if current_price is None or current_price <= 0 or total_equity <= 0:
@@ -389,7 +390,23 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
         sp = 0.0
     sp = max(0.0, min(1.0, sp)) or 1.0
 
-    final_buy_krw = bounded_buy_krw * sp
+    bounded_buy_krw *= sp
+
+    # ── Phase 4: position_cap 상한 + conviction booster ──────────────────────
+    if guardian_result is not None:
+        # position_cap: 총 자산 대비 허용 최대 투입액으로 clamp
+        cap_ceiling = total_equity * float(guardian_result.position_cap or 0.0)
+        bounded_buy_krw = min(bounded_buy_krw, cap_ceiling)
+
+        # Conviction Booster: G-10 활성 시 부스트 억제 (macro > pattern)
+        base_mult = float(guardian_result.buy_size_multiplier or 1.0)
+        if high_conviction and base_mult >= 1.0:
+            conviction_mult = 1.5
+        else:
+            conviction_mult = 1.0  # G-10(buy_size_mult<1) 중엔 부스트 없음
+        bounded_buy_krw *= base_mult * conviction_mult
+
+    final_buy_krw = bounded_buy_krw
     return float(final_buy_krw), float(risk_pct), float(sl_distance)
 
 
@@ -434,7 +451,9 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     adx_trend_threshold = float(best_params.get('adx_trend_threshold', 25.0))
     macro_ema_long = int(best_params.get('macro_ema_long', 50))
 
-    # ── PatternRecognizer: 관찰 모드 (패턴 로그만, 매매 로직 무영향) ──────────
+    # ── PatternRecognizer: 패턴 검출 + Phase 4 conviction/exit 판정 ────────────
+    _pr = None
+    _signals: list = []
     try:
         from trading_bot.pattern_recognizer import PatternRecognizer
         _pr = PatternRecognizer(df, timeframe=DEFAULT_INTERVAL)
@@ -448,6 +467,59 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                            _pr.fib.active_chain(current_price))
     except Exception as _pe:
         logger.debug('[PatternRecognizer] %s 실패 (무시): %s', ticker, _pe)
+
+    # ── Phase 4: Conviction 지표 추출 ────────────────────────────────────────
+    _max_strength = max((_ps.strength for _ps in _signals), default=0.0)
+    _is_dragon_strong  = any('DRAGON_STRONG'      in getattr(_ps, 'label', '') for _ps in _signals)
+    _is_loyalty_strong = any('LOYALTY_PASS_STRONG' in getattr(_ps, 'label', '') for _ps in _signals)
+    _high_conviction   = _max_strength >= 0.85 or (_is_dragon_strong and _is_loyalty_strong)
+
+    # Fib zone / retrace (swap·cash-rule에서 사용)
+    _fib_zone    = _pr.fib.zone(current_price)    if (_pr and _pr.fib and current_price) else ''
+    _fib_retrace = _pr.fib.retrace_ratio(current_price) if (_pr and _pr.fib and current_price) else 1.0
+    try:
+        _fib_retrace = float(_fib_retrace)
+    except Exception:
+        _fib_retrace = 1.0
+
+    # ── Phase 4: Hard Stop + Trailing Stop (오픈 포지션만) ───────────────────
+    if position_qty and float(position_qty) > 0 and current_price:
+        try:
+            from trading_bot.risk import evaluate_exit_signal, evaluate_trailing_stop, reset_trailing_peak
+            _exit = evaluate_exit_signal(
+                pattern_signals=_signals,
+                fib_manager=_pr.fib if _pr else None,
+                current_price=current_price,
+                avg_buy_price=float(avg_buy_price or 0),
+                sell_blocked=False,  # G-02 SUPER_CRISIS면 run_cycle()에서 이미 return
+            )
+            if _exit.urgency == 'hard':
+                logger.warning('[HARD STOP] %s | %s', ticker, _exit.reason)
+                ai_logger.info('[EXIT:HARD] %s | reason=%s', ticker, _exit.reason)
+                executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker)
+                reset_trailing_peak(ticker)
+                return 'executed', _exit.reason, None
+        except Exception as _ee:
+            logger.debug('[ExitSignal] %s 실패(무시): %s', ticker, _ee)
+
+        try:
+            from trading_bot.risk import evaluate_trailing_stop
+            _trail_sell, _trail_reason = evaluate_trailing_stop(ticker, current_price, current_roi)
+            if _trail_sell:
+                logger.info('[TRAIL STOP] %s | %s', ticker, _trail_reason)
+                ai_logger.info('[EXIT:TRAIL] %s | reason=%s', ticker, _trail_reason)
+                executor.place_order('sell', current_price, size_pct=0.5, ticker=ticker)
+                return 'executed', _trail_reason, None
+        except Exception as _te:
+            logger.debug('[TrailingStop] %s 실패(무시): %s', ticker, _te)
+    else:
+        # 포지션 없으면 trailing peak orphan 데이터 정리
+        try:
+            from trading_bot.risk import reset_trailing_peak, get_trailing_peak
+            if get_trailing_peak(ticker) > 0:
+                reset_trailing_peak(ticker)
+        except Exception:
+            pass
 
     try:
         result = generate_comprehensive_signal_with_logging(
@@ -578,9 +650,19 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 'estimated_spend': estimated_spend,
                 'atr': atr,
                 'reason': reason,
+                # Phase 4: conviction + fib 정보 (Pass 2 사이징·swap용)
+                'high_conviction': _high_conviction,
+                'max_pattern_strength': _max_strength,
+                'fib_zone': _fib_zone,
+                'fib_retrace': _fib_retrace,
             }
         try:
             executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker)
+            try:
+                from trading_bot.risk import reset_trailing_peak
+                reset_trailing_peak(ticker)
+            except Exception:
+                pass
             logger.info('✅ %s 매수 신호 실행: 가격 %.0f, 비중 %.2f%%', ticker, current_price, size_pct * 100)
             alloc = ACCOUNT_VALUE * size_pct if current_price else 0
             try:
@@ -662,6 +744,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 try:
                     from trading_bot.scale_out_manager import reset_trailing_high
                     reset_trailing_high(ticker)
+                except Exception:
+                    pass
+                try:
+                    from trading_bot.risk import reset_trailing_peak
+                    reset_trailing_peak(ticker)
                 except Exception:
                     pass
             _notify(f'🔴 매도 체결: {ticker} @ {fill_price_sell:,.0f}원', level='TRADE')
@@ -764,6 +851,90 @@ def _try_rotation(executor, tickers: list, new_item: dict) -> bool:
         return True
     except Exception as e:
         logger.warning('[Rotation] %s 매도 실패: %s', victim_ticker, e)
+        return False
+
+
+def _try_cash_swap(executor, tickers: list, new_item: dict, get_swap_score_fn) -> bool:
+    """Opportunity Cost Swap: 현금 부족 + 초강력 신호 시 최악 포지션 매도 → 현금 확보.
+
+    교체 우선순위: 피보 zone 점수 1순위, ROI 손실 2순위.
+    성공 시 True, 실패/조건 불충족 시 False.
+    """
+    try:
+        from trading_bot.balanced_plus import log_execution_event
+        import pyupbit
+    except Exception:
+        return False
+
+    SWAP_ZONE_THRESHOLD = 20.0  # swap_score 이 이상인 포지션만 교체 대상
+
+    candidates = []
+    for t in tickers:
+        if t == new_item.get('ticker'):
+            continue
+        qty = executor.get_position_qty(t)
+        if not qty or qty <= 0:
+            continue
+        avg = executor.get_avg_buy_price(t) or 0.0
+        try:
+            cur = float(pyupbit.get_current_price(t) or avg)
+        except Exception:
+            cur = avg
+        if avg <= 0 or cur <= 0:
+            continue
+        roi = (cur - avg) / avg * 100
+
+        # fib zone 계산 (실패 시 기본값)
+        fib_zone = ''
+        try:
+            from trading_bot.data import fetch_ohlcv
+            from trading_bot.pattern_recognizer import PatternRecognizer
+            _df = fetch_ohlcv(ticker=t, interval=DEFAULT_INTERVAL, count=60, use_db_first=True)
+            if _df is not None and len(_df) >= 20:
+                _pr = PatternRecognizer(_df, timeframe=DEFAULT_INTERVAL)
+                if _pr.fib:
+                    fib_zone = _pr.fib.zone(cur)
+        except Exception:
+            pass
+
+        score = get_swap_score_fn(roi, fib_zone)
+        if score < SWAP_ZONE_THRESHOLD:
+            continue
+        candidates.append({'ticker': t, 'price': cur, 'roi': roi, 'fib_zone': fib_zone, 'score': score})
+
+    if not candidates:
+        return False
+
+    # 가장 점수 높은(= 가장 상태 나쁜) 포지션 선정
+    victim = max(candidates, key=lambda x: x['score'])
+    victim_ticker = victim['ticker']
+    victim_price  = victim['price']
+
+    try:
+        fill_price = executor.place_order('sell', victim_price, size_pct=1.0, ticker=victim_ticker) or victim_price
+        log_execution_event(victim_ticker, 'sell', 'CASH_SWAP_SELL', fill_price)
+        try:
+            from trading_bot.risk import reset_trailing_peak
+            reset_trailing_peak(victim_ticker)
+        except Exception:
+            pass
+        logger.info(
+            '💱 [CashSwap] %s 매도(score=%.0f, fib=%s, ROI%.1f%%) → %s 매수 자금 확보',
+            victim_ticker, victim['score'], victim['fib_zone'], victim['roi'],
+            new_item.get('ticker'),
+        )
+        ai_logger.info('[CASH_SWAP] sell=%s score=%.0f fib=%s roi=%.1f%% → buy=%s',
+                       victim_ticker, victim['score'], victim['fib_zone'], victim['roi'],
+                       new_item.get('ticker'))
+        _notify(
+            f'💱 CashSwap: {victim_ticker} 매도(ROI {victim["roi"]:+.1f}%, {victim["fib_zone"]})'
+            f' → {new_item.get("ticker")} 매수',
+            level='TRADE',
+        )
+        executor.refresh_balance_cache()
+        return True
+    except Exception as e:
+        logger.warning('[CashSwap] %s 매도 실패: %s', victim_ticker, e)
         return False
 
 
@@ -1035,6 +1206,12 @@ def run_cycle(mode):
         if len(pending_buys_sorted) > 20:
             logger.info('  ... 외 %s건', len(pending_buys_sorted) - 20)
 
+        # ── Phase 4: EM-3 CASH_RULE 사전 계산 ────────────────────────────────
+        from trading_bot.risk import compute_cash_ratio, check_cash_floor, get_swap_score
+        _p4_cash_ratio = compute_cash_ratio(executor, total_equity)
+        _p4_regime     = guardian_result.regime if guardian_result else 'UNKNOWN'
+        logger.info('[CASH_RULE] regime=%s cash_ratio=%.1f%%', _p4_regime, _p4_cash_ratio * 100)
+
         # 가용 현금 및 Regime 기반 동적 포지션 사이징: 소액 시드도 5,000원 이상이면 실행.
         for item in pending_buys_sorted:
             if buys_executed_this_cycle >= MAX_BUYS_PER_CYCLE:
@@ -1074,8 +1251,49 @@ def run_cycle(mode):
                 ai_logger.info('[SKIP] %s | REASON:SKIP_BUY_COOLDOWN', ticker)
                 continue
 
+            # ── Phase 4: EM-3 CASH_RULE gate ─────────────────────────────────
+            is_panic_dip_buy   = 'Panic Dip-Buy' in (item.get('reason') or '')
+            _item_fib_zone     = item.get('fib_zone', '')
+            _item_fib_retrace  = float(item.get('fib_retrace', 1.0) or 1.0)
+            _item_max_strength = float(item.get('max_pattern_strength', 0.0) or 0.0)
+            _item_high_conv    = bool(item.get('high_conviction', False))
+
+            _cash_buy_ok, _cash_floor, _panic_mode = check_cash_floor(
+                regime=_p4_regime,
+                cash_ratio=_p4_cash_ratio,
+                is_panic_dip=is_panic_dip_buy,
+                fib_zone=_item_fib_zone,
+                fib_retrace=_item_fib_retrace,
+                max_signal_strength=_item_max_strength,
+                fng_value=fng_value,
+            )
+            if not _cash_buy_ok:
+                # 현금 부족 — 초강력 신호(≥0.85)면 Swap 시도, 아니면 스킵
+                if _item_high_conv and not circuit_breaker_active:
+                    # Opportunity Cost Swap: 최악 포지션 매도 후 현금 확보
+                    _swap_done = _try_cash_swap(
+                        executor, tickers, item, get_swap_score,
+                    )
+                    if _swap_done:
+                        executor.refresh_balance_cache()
+                        remaining_cash = executor.get_available_cash()
+                        _p4_cash_ratio = compute_cash_ratio(executor, total_equity)
+                        logger.info('[CASH_SWAP] %s 고신뢰 신호(%.2f) — swap 성공, 매수 진행',
+                                    ticker, _item_max_strength)
+                    else:
+                        logger.info('[CASH_RULE] %s — 현금%.1f%% < 하한%.1f%%, swap 불가 → 스킵',
+                                    ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                        ai_logger.info('[SKIP] %s | REASON:CASH_RULE(%.0f%%<%.0f%%)',
+                                       ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                        continue
+                else:
+                    logger.info('[CASH_RULE] %s — 현금%.1f%% < 하한%.1f%% → 스킵',
+                                ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                    ai_logger.info('[SKIP] %s | REASON:CASH_RULE(%.0f%%<%.0f%%)',
+                                   ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                    continue
+
             # Panic Dip-Buy: 보수적 포지션 사이즈 오버라이드 (falling knife 리스크)
-            is_panic_dip_buy = 'Panic Dip-Buy' in (item.get('reason') or '')
             if is_panic_dip_buy:
                 try:
                     from trading_bot.config import PANIC_DIP_BUY_SIZE_PCT
@@ -1088,7 +1306,7 @@ def run_cycle(mode):
                 logger.info('[Panic Dip-Buy] %s — 보수적 사이즈 적용 (%.0f%% = %.0f원)', ticker, panic_size * 100, final_buy_krw)
                 ai_logger.info('[PANIC_DIP_BUY] %s | size=%.0f%% | amt=%.0fKRW', ticker, panic_size * 100, final_buy_krw)
             else:
-                # Regime-Dependent Dynamic Position Sizing (+ Volatility Targeting)
+                # Phase 4: position_cap + conviction booster 포함 동적 사이징
                 final_buy_krw, risk_pct, sl_distance = calculate_dynamic_size(
                     total_equity=total_equity,
                     current_price=price,
@@ -1097,6 +1315,8 @@ def run_cycle(mode):
                     is_global_bull_market=is_global_bull_market,
                     ticker=ticker,
                     fng_value=fng_value,
+                    guardian_result=guardian_result,
+                    high_conviction=_item_high_conv,
                 )
             if final_buy_krw <= 0:
                 continue
