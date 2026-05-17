@@ -149,7 +149,14 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
     # DB에서 먼저 데이터 가져오기 시도
     if use_db_first:
         df_db = fetch_ohlcv_from_db(ticker=ticker, interval=interval, count=count)
-        if df_db is not None and len(df_db) >= count * 0.8:  # 80% 이상 데이터가 있으면 사용
+        # interval별 허용 stale 시간: minute60 → 3h, day → 36h
+        _stale_hours = 3 if 'minute' in interval else 36
+        _db_fresh = (
+            df_db is not None
+            and len(df_db) >= count * 0.8
+            and (pd.Timestamp.utcnow() - df_db['time'].max().tz_convert('UTC')) < pd.Timedelta(hours=_stale_hours)
+        )
+        if _db_fresh:
             # 최신 데이터만 API에서 가져와서 보완
             try:
                 import random
