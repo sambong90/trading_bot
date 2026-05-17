@@ -648,8 +648,9 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     if signal == 'hold':
         return 'hold', reason, None
 
-    # v7: Dynamic Signal Threshold — 연속 손실 streak에 비례해 진입 임계값 상향
+    # v7: 매수 진입 필터 (Dynamic Threshold + EMA + RSI)
     if signal == 'buy':
+        # Dynamic Signal Threshold — 연속 손실 streak에 비례해 진입 임계값 상향
         try:
             from trading_bot.risk import get_system_state as _gss_dyn
             _consec = int(_gss_dyn('consec_losses', '0') or 0)
@@ -660,6 +661,16 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 return 'skip', f'DYN_THR({_dyn_thr:.2f}):str={_max_strength:.2f}', None
         except Exception:
             pass
+        # EMA 필터: 현재가 > EMA_short (EMA12, EMA20 proxy) — 추세 역방향 진입 방지
+        _ema_s = float(indicators.get('ema_short', 0) or 0)
+        if _ema_s > 0 and (current_price or 0) < _ema_s:
+            ai_logger.info('[SKIP] %s | EMA_FILTER | price=%.0f < ema=%.0f', ticker, current_price, _ema_s)
+            return 'skip', f'EMA_FILTER({current_price:.0f}<{_ema_s:.0f})', None
+        # RSI 과매수 필터: RSI > 70 이면 로컬 고점 진입 방지
+        _rsi_now = float(indicators.get('rsi', 50) or 50)
+        if _rsi_now > 70.0:
+            ai_logger.info('[SKIP] %s | RSI_OVERBUY | rsi=%.1f', ticker, _rsi_now)
+            return 'skip', f'RSI_OVERBUY({_rsi_now:.1f})', None
 
     # 매수: defer_buy(투패스)일 때는 실행하지 않고 pending_buys용 데이터만 반환
     if signal == 'buy' and position_size > 0:
@@ -1364,6 +1375,19 @@ def run_cycle(mode):
                 if _streak_over > 0:
                     _kelly_cap *= (1 - KELLY_STREAK_PCT) ** _streak_over
                 final_buy_krw = min(final_buy_krw, _kelly_cap)
+            except Exception:
+                pass
+            # v7: Wealth Protection — 총 ROI ≥ 25% 시 사이즈 50% 감축
+            try:
+                from trading_bot.risk import get_system_state as _gss_wp, set_system_state as _sss_wp
+                _base_cap = float(_gss_wp('base_capital', '0') or 0)
+                if _base_cap <= 0:
+                    _sss_wp('base_capital', str(total_equity))
+                    _base_cap = total_equity
+                if _base_cap > 0 and (total_equity - _base_cap) / _base_cap >= 0.25:
+                    final_buy_krw *= 0.5
+                    logger.info('[WealthProtect] %s — ROI≥25%%, 사이즈 50%% 감축 (equity=%.0f base=%.0f)',
+                                ticker, total_equity, _base_cap)
             except Exception:
                 pass
             if final_buy_krw <= 0:
