@@ -93,9 +93,12 @@ def prune_old_data():
             deleted_tr = 0
         logger.info('prune TuningRun: %s rows (older than 30d, latest record kept)', deleted_tr)
 
-        # AiEvent: 30일 초과 삭제
-        deleted_ai = session.query(AiEvent).filter(AiEvent.ts < cutoff_30d).delete(synchronize_session=False)
-        logger.info('prune AiEvent: %s rows (older than 30d)', deleted_ai)
+        # AiEvent: EXECUTE/STOP_LOSS/SCALE_OUT/DCA는 영구 보존, 나머지 90일 초과 삭제
+        deleted_ai = session.query(AiEvent).filter(
+            AiEvent.ts < cutoff_90d,
+            AiEvent.event.notin_(['EXECUTE', 'STOP_LOSS', 'SCALE_OUT', 'DCA']),
+        ).delete(synchronize_session=False)
+        logger.info('prune AiEvent: %s rows (90d+ non-trade events)', deleted_ai)
 
         session.commit()
         return {

@@ -225,7 +225,8 @@ class AiEvent(Base):
     """전략 판단·매매 액션 이벤트 — ai_analysis.jsonl 대체 DB 저장소.
 
     event 유형: STRATEGY | EXECUTE | SKIP | ERROR | STOP_LOSS | DCA | SCALE_OUT
-    보존 기간: 30일 (db_maintenance.py에서 자동 정리)
+    보존 정책: EXECUTE/STOP_LOSS/SCALE_OUT/DCA → 영구 보존 (장기 성과 분석용)
+               STRATEGY/SKIP/ERROR → 90일 초과분 정리 (db_maintenance.py)
     """
     __tablename__ = 'ai_events'
     __table_args__ = (
