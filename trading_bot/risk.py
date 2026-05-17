@@ -260,7 +260,7 @@ def evaluate_trailing_stop(
 
     Returns: (should_sell_half: bool, reason: str)
     """
-    if current_roi <= 5.0:
+    if current_roi <= 8.0:
         update_trailing_peak(ticker, current_price)
         return False, ''
 
