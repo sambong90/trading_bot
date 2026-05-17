@@ -264,7 +264,7 @@ def _normalize_ts(ts):
 
 def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
     """
-    OHLCV로 지표 계산 후 technical_indicators에 저장.
+    OHLCV로 지표 계산 후 ohlcv + technical_indicators에 저장.
 
     [H2 FIX] N+1 개별 SELECT → PostgreSQL UPSERT (1 쿼리) 또는
     두 단계 bulk INSERT/UPDATE (2 쿼리) 로 교체.
@@ -272,13 +272,55 @@ def sync_indicators_for_ticker(ticker, timeframe, df_ohlcv=None):
     개선: ticker당 1~2 쿼리 → 60 ticker × 2 = 120 쿼리/사이클.
     """
     from trading_bot.db import get_session
-    from trading_bot.models import TechnicalIndicator
+    from trading_bot.models import TechnicalIndicator, OHLCV
     from trading_bot.param_manager import get_best_params
 
     if df_ohlcv is None or len(df_ohlcv) == 0:
         df_ohlcv = load_ohlcv_from_db(ticker, timeframe, count=300)
     if df_ohlcv is None or len(df_ohlcv) < 30:
         return False
+
+    # --- OHLCV upsert: API에서 받은 신선한 봉 데이터를 DB에 저장 ---
+    try:
+        from sqlalchemy.dialects.postgresql import insert as _pg_insert_ohlcv
+        ohlcv_rows = []
+        for idx in range(len(df_ohlcv)):
+            row = df_ohlcv.iloc[idx]
+            ts = row.get('time') if hasattr(row, 'get') else row.name
+            if hasattr(ts, 'to_pydatetime'):
+                ts = ts.to_pydatetime()
+            ts = _normalize_ts(ts)
+            if ts is None:
+                continue
+            ohlcv_rows.append({
+                'ticker': ticker,
+                'timeframe': timeframe,
+                'ts': ts,
+                'open': _float_or_none(row.get('open') if hasattr(row, 'get') else row.get('open', None)),
+                'high': _float_or_none(row.get('high') if hasattr(row, 'get') else None),
+                'low': _float_or_none(row.get('low') if hasattr(row, 'get') else None),
+                'close': _float_or_none(row.get('close') if hasattr(row, 'get') else None),
+                'volume': _float_or_none(row.get('volume') if hasattr(row, 'get') else None),
+                'source': 'live',
+            })
+        if ohlcv_rows:
+            _session_ohlcv = get_session()
+            try:
+                stmt_o = _pg_insert_ohlcv(OHLCV).values(ohlcv_rows)
+                stmt_o = stmt_o.on_conflict_do_update(
+                    constraint='u_ticker_timeframe_ts',
+                    set_={'open': stmt_o.excluded.open, 'high': stmt_o.excluded.high,
+                          'low': stmt_o.excluded.low, 'close': stmt_o.excluded.close,
+                          'volume': stmt_o.excluded.volume},
+                )
+                _session_ohlcv.execute(stmt_o)
+                _session_ohlcv.commit()
+            except Exception:
+                _session_ohlcv.rollback()
+            finally:
+                _session_ohlcv.close()
+    except Exception:
+        pass  # OHLCV 저장 실패는 지표 계산을 막지 않음
 
     params = get_best_params()
     df = compute_indicators(

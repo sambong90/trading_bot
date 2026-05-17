@@ -149,8 +149,8 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
     # DB에서 먼저 데이터 가져오기 시도
     if use_db_first:
         df_db = fetch_ohlcv_from_db(ticker=ticker, interval=interval, count=count)
-        # interval별 허용 stale 시간: minute60 → 3h, day → 36h
-        _stale_hours = 3 if 'minute' in interval else 36
+        # interval별 허용 stale 시간: minute60 → 2h (캔들 주기 2배), day → 36h
+        _stale_hours = 2 if 'minute' in interval else 36
         _db_fresh = (
             df_db is not None
             and len(df_db) >= count * 0.8
