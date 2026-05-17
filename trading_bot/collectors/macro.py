@@ -136,7 +136,7 @@ def collect(session=None) -> dict | None:
         logger.error('yfinance 미설치. pip install yfinance')
         return None
 
-    tickers = ['^DXY', '^NDX', 'GC=F', '^TNX', '^TYX', 'USDJPY=X', 'CL=F']
+    tickers = ['DX=F', '^IXIC', 'GC=F', '^TNX', '^TYX', 'USDJPY=X', 'CL=F']
     try:
         raw = yf.download(
             tickers,
@@ -169,8 +169,8 @@ def collect(session=None) -> dict | None:
         except Exception:
             return None
 
-    dxy      = _last('^DXY')
-    nasdaq   = _last('^NDX')
+    dxy      = _last('DX=F')
+    nasdaq   = _last('^IXIC')
     gold     = _last('GC=F')
     us10y    = _last('^TNX')
     us30y    = _last('^TYX')
@@ -181,8 +181,8 @@ def collect(session=None) -> dict | None:
         logger.error('DXY 또는 NDX 데이터 없음 — MacroSnapshot 저장 중단')
         return None
 
-    dxy_prev    = _prev('^DXY')
-    nasdaq_prev = _prev('^NDX')
+    dxy_prev    = _prev('DX=F')
+    nasdaq_prev = _prev('^IXIC')
     gold_prev   = _prev('GC=F')
     usdjpy_prev = _prev('USDJPY=X')
     oil_prev    = _prev('CL=F')
