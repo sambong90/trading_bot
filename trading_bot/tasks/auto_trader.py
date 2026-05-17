@@ -81,6 +81,18 @@ RISK_PCT_BEAR = float(os.environ.get('RISK_PCT_BEAR', '0.02'))
 MAX_PER_COIN_PCT = float(os.environ.get('MAX_PER_COIN_PCT', '0.20'))
 ATR_SL_MULT = float(os.environ.get('ATR_SL_MULT', '2.0'))
 
+# ── v7: Fractional Kelly sizing cap ──────────────────────────────────────────
+# backtest 보정값 (W=27.6%, b=6.09, frac=0.25 → ~3.93% per trade)
+_KELLY_W         = 0.276
+_KELLY_B         = 6.09
+KELLY_FRACTION   = round(0.25 * (_KELLY_W - (1 - _KELLY_W) / _KELLY_B), 4)  # 0.0393
+KELLY_STREAK_THR = 5     # 연속 손실 이 값 초과 시 추가 감축
+KELLY_STREAK_PCT = 0.20  # 초과 1건당 20% 감축
+# ── v7: Dynamic Signal Threshold (Logic Circuit Breaker) ─────────────────────
+DYNAMIC_THR_BASE    = 0.85
+DYNAMIC_THR_MAX     = 0.98
+DYNAMIC_THR_PENALTY = 0.02
+
 
 # [NEW] 알림 레벨별 텔레그램 전송 헬퍼
 def _notify(msg: str, level: str = 'TRADE'):
@@ -244,6 +256,16 @@ def sync_manual_trades(executor, tickers):
         set_system_state('balance_snapshot', json.dumps(dict(cache)))
     except Exception as e:
         logger.debug('[sync_manual_trades] 오류 (무시): %s', e)
+
+
+def _update_consec_losses(roi: float) -> None:
+    """매도 ROI 기반으로 system_state의 연속 손실 카운터를 갱신."""
+    try:
+        from trading_bot.risk import get_system_state, set_system_state
+        current = int(get_system_state('consec_losses', '0') or 0)
+        set_system_state('consec_losses', str(current + 1) if roi < 0 else '0')
+    except Exception:
+        pass
 
 
 def compute_total_account_equity(executor, tickers):
@@ -498,6 +520,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 ai_logger.info('[EXIT:HARD] %s | reason=%s', ticker, _exit.reason)
                 executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker)
                 reset_trailing_peak(ticker)
+                _update_consec_losses(current_roi)
                 return 'executed', _exit.reason, None
         except Exception as _ee:
             logger.debug('[ExitSignal] %s 실패(무시): %s', ticker, _ee)
@@ -509,6 +532,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 logger.info('[TRAIL STOP] %s | %s', ticker, _trail_reason)
                 ai_logger.info('[EXIT:TRAIL] %s | reason=%s', ticker, _trail_reason)
                 executor.place_order('sell', current_price, size_pct=0.5, ticker=ticker)
+                _update_consec_losses(current_roi)
                 return 'executed', _trail_reason, None
         except Exception as _te:
             logger.debug('[TrailingStop] %s 실패(무시): %s', ticker, _te)
@@ -623,6 +647,19 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
 
     if signal == 'hold':
         return 'hold', reason, None
+
+    # v7: Dynamic Signal Threshold — 연속 손실 streak에 비례해 진입 임계값 상향
+    if signal == 'buy':
+        try:
+            from trading_bot.risk import get_system_state as _gss_dyn
+            _consec = int(_gss_dyn('consec_losses', '0') or 0)
+            _dyn_thr = min(DYNAMIC_THR_MAX, DYNAMIC_THR_BASE + _consec * DYNAMIC_THR_PENALTY)
+            if _max_strength < _dyn_thr:
+                ai_logger.info('[SKIP] %s | DYN_THR | str=%.2f thr=%.2f streak=%d',
+                               ticker, _max_strength, _dyn_thr, _consec)
+                return 'skip', f'DYN_THR({_dyn_thr:.2f}):str={_max_strength:.2f}', None
+        except Exception:
+            pass
 
     # 매수: defer_buy(투패스)일 때는 실행하지 않고 pending_buys용 데이터만 반환
     if signal == 'buy' and position_size > 0:
@@ -1318,6 +1355,17 @@ def run_cycle(mode):
                     guardian_result=guardian_result,
                     high_conviction=_item_high_conv,
                 )
+            # v7: Fractional Kelly cap — 거래당 최대 3.93% × equity
+            try:
+                from trading_bot.risk import get_system_state as _gss_kelly
+                _consec_k  = int(_gss_kelly('consec_losses', '0') or 0)
+                _kelly_cap = total_equity * KELLY_FRACTION
+                _streak_over = max(0, _consec_k - KELLY_STREAK_THR)
+                if _streak_over > 0:
+                    _kelly_cap *= (1 - KELLY_STREAK_PCT) ** _streak_over
+                final_buy_krw = min(final_buy_krw, _kelly_cap)
+            except Exception:
+                pass
             if final_buy_krw <= 0:
                 continue
 

@@ -555,10 +555,17 @@ if __name__ == '__main__':
     sched.start()
     _write_heartbeat()
 
+    try:
+        from trading_bot.risk import get_system_state as _gss_boot
+        _boot_equity = float(_gss_boot('prev_cycle_equity', '0') or 0)
+        _equity_line = f'계좌 평가액: {_boot_equity:,.0f}원\n' if _boot_equity > 0 else ''
+    except Exception:
+        _equity_line = ''
     _notify_scheduler(
         f'스케줄러 기동\n'
         f'시각: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n'
         f'매매: {"활성" if os.environ.get("ENABLE_AUTO_TRADING","0")=="1" else "비활성"}\n'
+        f'{_equity_line}'
         f'캔들 오프셋: {_offset_sec}초 후'
     )
 
