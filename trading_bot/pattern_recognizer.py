@@ -303,7 +303,8 @@ class PatternRecognizer:
         loss  = np.where(delta < 0, -delta, 0.0)
         avg_gain = np.convolve(gain, np.ones(period) / period, mode='full')[:len(closes)]
         avg_loss = np.convolve(loss, np.ones(period) / period, mode='full')[:len(closes)]
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100.0)
         return 100.0 - (100.0 / (1.0 + rs))
 
     # ── 통합 평가 ────────────────────────────────────────────────────────────
