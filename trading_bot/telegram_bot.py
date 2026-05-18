@@ -239,25 +239,33 @@ def cmd_balance() -> str:
 
 
 def cmd_report() -> str:
-    lines = [f'<b>📋 오늘 체결 리포트</b> (<code>{datetime.now().strftime("%Y-%m-%d")}</code>)', '']
+    lines = [f'<b>📊 주간 성과 리포트</b> (<code>{datetime.now().strftime("%Y-%m-%d")}</code>)', '']
     try:
-        from trading_bot.db import get_session
-        from trading_bot.models import Order
-        session = get_session()
-        # KST 자정 기준으로 오늘 체결 조회 (헤더 날짜와 일치). Order.ts는 UTC 저장이므로 -9h 변환
-        today_kst = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_start = today_kst - timedelta(hours=9)  # KST 자정 → UTC
-        rows = session.query(Order).filter(Order.ts >= today_start).all()
-        session.close()
-        buys = [r for r in rows if (r.side or '').lower() == 'buy']
-        sells = [r for r in rows if (r.side or '').lower() == 'sell']
-        buy_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in buys)
-        sell_sum = sum(float(r.price or 0) * float(r.qty or 0) for r in sells)
-        pnl = sell_sum - buy_sum
-        pnl_str = f'+{pnl:,.0f}원' if pnl >= 0 else f'{pnl:,.0f}원'
-        lines.append(f'매수: <b>{len(buys)}건</b>  {buy_sum:,.0f}원')
-        lines.append(f'매도: <b>{len(sells)}건</b>  {sell_sum:,.0f}원')
-        lines.append(f'실현 P&L: <b>{pnl_str}</b>')
+        from trading_bot.analytics import get_trade_summary, get_risk_metrics
+        s = get_trade_summary(7)
+        r = get_risk_metrics(7)
+
+        lines.append(f'기간: 최근 7일')
+        lines.append(f'매수: <b>{s["total_buys"]}건</b> / 청산: <b>{s["total_exits"]}건</b>')
+        if s['total_exits']:
+            lines.append(f'승률: <b>{s["win_rate"]}%</b> ({s["wins"]}승 {s["losses"]}패)')
+            lines.append(f'평균 수익: <b>+{s["avg_win_pct"]}%</b> / 평균 손실: <b>{s["avg_loss_pct"]}%</b>')
+            if s['profit_factor']:
+                lines.append(f'손익비: <b>{s["profit_factor"]}</b>')
+            lines.append(f'최대 수익: +{s["max_win_pct"]}% / 최대 손실: {s["max_loss_pct"]}%')
+        else:
+            lines.append('(청산 기록 없음)')
+
+        lines.append('')
+        lines.append(f'🛡 MDD(근사): <b>-{r["mdd_approx_pct"]}%</b> | CB: {r["cb_count"]}회')
+        lines.append(f'연속 손실: {r["consec_losses"]}회 | 오픈 포지션: {r["open_positions"]}')
+
+        if s['daily_roi']:
+            lines.append('')
+            lines.append('<b>일별 ROI 합계</b>')
+            for day, roi in sorted(s['daily_roi'].items()):
+                sign = '+' if roi >= 0 else ''
+                lines.append(f'{day}: {sign}{roi}%')
     except Exception as e:
         lines.append(f'리포트 조회 실패: {html.escape(str(e))}')
     return '\n'.join(lines)

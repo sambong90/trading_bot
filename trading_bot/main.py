@@ -79,6 +79,19 @@ def logs_page():
 def analysis_page():
     return render_template('analysis.html')
 
+@app.route('/analytics')
+def analytics_page():
+    return render_template('analytics.html')
+
+@app.route('/api/analytics')
+def api_analytics():
+    from trading_bot.analytics import get_full_report
+    try:
+        days = int(request.args.get('days', 7))
+        return jsonify(get_full_report(summary_days=days))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/logs')
 def api_logs():
     # return last lines of trading bot logs

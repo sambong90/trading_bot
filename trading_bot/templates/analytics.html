@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Analytics - Trading Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    .container{max-width:1100px;margin:20px auto}
+    .card{border:1px solid #e5e5e5;padding:14px;border-radius:8px;background:#fff;margin-bottom:14px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    table{width:100%;border-collapse:collapse;font-size:0.9rem}
+    th,td{padding:7px 10px;border-bottom:1px solid #eee;text-align:right}
+    th{text-align:left;background:#f7f7f7;font-weight:600}
+    td:first-child{text-align:left}
+    .pos{color:#e74c3c}.neg{color:#2980b9}.neu{color:#555}
+    .stat-row{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:4px}
+    .stat{display:flex;flex-direction:column;min-width:120px}
+    .stat-label{font-size:0.75rem;color:#888}
+    .stat-value{font-size:1.3rem;font-weight:700}
+    select,button{padding:5px 12px;border-radius:5px;border:1px solid #ccc;cursor:pointer}
+    button.btn-primary{background:#3498db;color:#fff;border-color:#3498db}
+    h3{margin:0 0 10px}
+  </style>
+</head>
+<body>
+<div id="app" class="container">
+  <div class="nav card">
+    <button class="btn" onclick="location.href='/'">메인</button>
+    <button class="btn" onclick="location.href='/decisions'">Decisions</button>
+    <button class="btn" onclick="location.href='/account'">Account</button>
+    <button class="btn" onclick="location.href='/analytics'">📊 Analytics</button>
+    <button class="btn btn-secondary" onclick="location.href='/status'">Status</button>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+    <h1 style="margin:0">📊 성과 분석</h1>
+    <select v-model="days" @change="load">
+      <option value="7">최근 7일</option>
+      <option value="14">최근 14일</option>
+      <option value="30">최근 30일</option>
+    </select>
+    <button class="btn-primary" @click="load">새로고침</button>
+    <span v-if="loading" style="color:#aaa">로딩중...</span>
+    <span v-if="error" style="color:red">{{error}}</span>
+  </div>
+
+  <!-- 거래 요약 -->
+  <div class="card" v-if="data.summary">
+    <h3>거래 요약 (최근 {{data.summary.period_days}}일)</h3>
+    <div class="stat-row">
+      <div class="stat"><span class="stat-label">매수</span><span class="stat-value">{{data.summary.total_buys}}건</span></div>
+      <div class="stat"><span class="stat-label">청산</span><span class="stat-value">{{data.summary.total_exits}}건</span></div>
+      <div class="stat"><span class="stat-label">승률</span><span class="stat-value" :class="data.summary.win_rate>=50?'pos':'neg'">{{data.summary.win_rate}}%</span></div>
+      <div class="stat"><span class="stat-label">승/패</span><span class="stat-value">{{data.summary.wins}}승 {{data.summary.losses}}패</span></div>
+      <div class="stat"><span class="stat-label">평균 수익</span><span class="stat-value pos">+{{data.summary.avg_win_pct}}%</span></div>
+      <div class="stat"><span class="stat-label">평균 손실</span><span class="stat-value neg">{{data.summary.avg_loss_pct}}%</span></div>
+      <div class="stat"><span class="stat-label">손익비</span><span class="stat-value">{{data.summary.profit_factor ?? 'N/A'}}</span></div>
+      <div class="stat"><span class="stat-label">최대 수익</span><span class="stat-value pos">+{{data.summary.max_win_pct}}%</span></div>
+      <div class="stat"><span class="stat-label">최대 손실</span><span class="stat-value neg">{{data.summary.max_loss_pct}}%</span></div>
+    </div>
+
+    <div v-if="Object.keys(data.summary.daily_roi||{}).length" style="margin-top:12px">
+      <h3>일별 ROI 합계</h3>
+      <table>
+        <thead><tr><th>날짜</th><th>ROI 합계</th></tr></thead>
+        <tbody>
+          <tr v-for="(roi, day) in data.summary.daily_roi" :key="day">
+            <td>{{day}}</td>
+            <td :class="roi>=0?'pos':'neg'">{{roi>=0?'+':''}}{{roi}}%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 리스크 지표 -->
+  <div class="card" v-if="data.risk">
+    <h3>리스크 지표</h3>
+    <div class="stat-row">
+      <div class="stat"><span class="stat-label">MDD (근사)</span><span class="stat-value neg">-{{data.risk.mdd_approx_pct}}%</span></div>
+      <div class="stat"><span class="stat-label">CB 발동</span><span class="stat-value">{{data.risk.cb_count}}회</span></div>
+      <div class="stat"><span class="stat-label">연속 손실</span><span class="stat-value" :class="data.risk.consec_losses>0?'neg':'neu'">{{data.risk.consec_losses}}회</span></div>
+      <div class="stat"><span class="stat-label">오픈 포지션</span><span class="stat-value">{{data.risk.open_positions}}</span></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <!-- 규칙별 성과 -->
+    <div class="card" v-if="data.rules">
+      <h3>청산 규칙별 성과 (최근 {{data.rules.period_days}}일)</h3>
+      <table v-if="Object.keys(data.rules.exit_rules||{}).length">
+        <thead><tr><th>규칙</th><th>횟수</th><th>승률</th><th>평균 ROI</th><th>최대</th><th>최소</th></tr></thead>
+        <tbody>
+          <tr v-for="(s, rule) in data.rules.exit_rules" :key="rule">
+            <td>{{rule}}</td>
+            <td>{{s.count}}</td>
+            <td :class="s.win_rate>=50?'pos':'neg'">{{s.win_rate}}%</td>
+            <td :class="s.avg_roi>=0?'pos':'neg'">{{s.avg_roi>=0?'+':''}}{{s.avg_roi}}%</td>
+            <td class="pos">+{{s.max_roi}}%</td>
+            <td class="neg">{{s.min_roi}}%</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else style="color:#aaa">청산 이벤트 없음</p>
+
+      <div v-if="Object.keys(data.rules.buy_rules||{}).length" style="margin-top:12px">
+        <h3>매수 트리거 분포</h3>
+        <table>
+          <thead><tr><th>규칙</th><th>횟수</th></tr></thead>
+          <tbody>
+            <tr v-for="(cnt, rule) in data.rules.buy_rules" :key="rule">
+              <td>{{rule}}</td><td>{{cnt}}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 시간대별 분석 -->
+    <div class="card" v-if="data.hourly">
+      <h3>요일별 청산 분포</h3>
+      <table>
+        <thead><tr><th>요일</th><th>횟수</th><th>평균 ROI</th></tr></thead>
+        <tbody>
+          <tr v-for="(v, d) in data.hourly.by_weekday" :key="d">
+            <td>{{d}}</td>
+            <td>{{v.count}}</td>
+            <td :class="v.avg_roi>=0?'pos':'neg'">{{v.count?((v.avg_roi>=0?'+':'')+v.avg_roi+'%'):'-'}}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 style="margin-top:14px">시간대별 청산 분포 (KST)</h3>
+      <table>
+        <thead><tr><th>시간</th><th>횟수</th><th>평균 ROI</th></tr></thead>
+        <tbody>
+          <tr v-for="(v, h) in activeHours" :key="h">
+            <td>{{h}}시</td>
+            <td>{{v.count}}</td>
+            <td :class="v.avg_roi>=0?'pos':'neg'">{{(v.avg_roi>=0?'+':'')+v.avg_roi}}%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script>
+const { createApp } = Vue
+createApp({
+  data() {
+    return { days: '7', data: {}, loading: false, error: '' }
+  },
+  computed: {
+    activeHours() {
+      if (!this.data.hourly) return {}
+      return Object.fromEntries(
+        Object.entries(this.data.hourly.by_hour).filter(([, v]) => v.count > 0)
+      )
+    }
+  },
+  methods: {
+    load() {
+      this.loading = true
+      this.error = ''
+      fetch(`/api/analytics?days=${this.days}`)
+        .then(r => r.json())
+        .then(d => { this.data = d; this.loading = false })
+        .catch(e => { this.error = e.message; this.loading = false })
+    }
+  },
+  mounted() { this.load() }
+}).mount('#app')
+</script>
+</body>
+</html>
