@@ -63,3 +63,18 @@ PANIC_DIP_BUY_SIZE_PCT = float(os.environ.get('PANIC_DIP_BUY_SIZE_PCT', '0.3'))
 
 # Multi-TF 4h Confluence 활성화
 MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+
+# ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
+# BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.
+DYN_THR_BY_REGIME: dict = {
+    'BULL_CLIMAX':    0.50,   # 대불장 — 전략 신호만으로 충분
+    'BULL_CONFIRMED': 0.55,   # 불장 확정 — 패턴 보조 확인 수준
+    'BULL_EARLY':     0.60,   # 초기 불장 — 약간의 패턴 확인
+    'SIDEWAYS':       0.75,   # 횡보 — 패턴 확인 중요
+    'BEAR_WARNING':   0.85,   # 하락 경고 — 기존 수준 유지
+    'BEAR_CONFIRMED': 0.90,   # 하락장 — 매우 강한 패턴만
+    'UNKNOWN':        1.00,   # 데이터 미비 — 완전 차단
+}
+# 전체 오버라이드: 긴급/디버깅 용도. 설정 시 장세별 매핑 무시.
+_dyn_thr_override_raw = os.environ.get('DYN_THR_OVERRIDE', '')
+DYN_THR_OVERRIDE: float | None = float(_dyn_thr_override_raw) if _dyn_thr_override_raw else None

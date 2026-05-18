@@ -53,9 +53,10 @@ class MarketGuardian:
         from trading_bot.collectors.aggregator import get_market_context
         ctx = get_market_context()
 
-        macro     = ctx.get('macro') or {}
-        dominance = ctx.get('dominance') or {}
-        btc_w200  = ctx.get('btc_weekly_200_above', False)
+        macro            = ctx.get('macro') or {}
+        dominance        = ctx.get('dominance') or {}
+        btc_w200         = ctx.get('btc_weekly_200_above', False)
+        stale_but_usable = ctx.get('stale_but_usable', False)
 
         flags: list[str] = []
         block_reasons: list[str] = []
@@ -176,6 +177,12 @@ class MarketGuardian:
         # G-05/G-08 으로 이미 allow_new_entry=False면 position_cap도 0
         if not allow_new_entry:
             position_cap = 0.0
+
+        # ── STALE_BUT_USABLE: 신규 진입 사이즈 50% 축소 ────────────────────
+        if stale_but_usable:
+            flags.append('STALE_BUT_USABLE')
+            buy_size_multiplier = min(buy_size_multiplier, 0.5)
+            logger.info('[Guardian] STALE_BUT_USABLE — buy_size_multiplier capped at 0.5')
 
         logger.info(
             '[Guardian] L1 PASS | L2 regime=%s cap=%.0f%% new_entry=%s alt_block=%s size_mult=%.1f flags=%s',

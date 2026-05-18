@@ -24,8 +24,11 @@ from trading_bot.collectors import kimp as _kimp
 logger = logging.getLogger(__name__)
 
 _KST = timezone(timedelta(hours=9))
-_STALE_HOURS_WEEKDAY = 26   # 평일: 24h 수집 주기 + 2h 여유
-_STALE_HOURS_WEEKEND = 72   # 주말: 금요일 데이터로 토~일 전체 커버
+_STALE_HOURS_FRESH        = 26   # 평일 수집 주기 + 여유
+_STALE_BUT_USABLE_HOURS   = 72   # STALE_BUT_USABLE 상한 (3일)
+# 하위 호환용 alias
+_STALE_HOURS_WEEKDAY = _STALE_HOURS_FRESH
+_STALE_HOURS_WEEKEND = _STALE_BUT_USABLE_HOURS
 
 
 def _is_weekend_kst() -> bool:
@@ -110,19 +113,24 @@ def get_market_context() -> dict:
 
     block_reasons: list[str] = []
     is_tradeable = True
+    stale_but_usable = False
 
     if macro is None:
         block_reasons.append('MACRO_DATA_MISSING')
         is_tradeable = False
     else:
-        weekend = _is_weekend_kst()
-        threshold = _STALE_HOURS_WEEKEND if weekend else _STALE_HOURS_WEEKDAY
         age_h = _macro_age_hours(macro)
-        if age_h > threshold:
+        if age_h > _STALE_BUT_USABLE_HOURS:
+            # 3일 초과 — 데이터 신뢰 불가, 완전 차단
             block_reasons.append('RATIO_STALE_EM7')
             is_tradeable = False
-        elif weekend:
-            logger.info('[GUARDIAN] Weekend Mode Active - Using last known macro data (age=%.1fh)', age_h)
+        elif age_h > _STALE_HOURS_FRESH:
+            # 26h~72h — 이전 데이터 활용 가능하나 신규 진입 사이즈 축소
+            stale_but_usable = True
+            logger.info(
+                '[GUARDIAN] STALE_BUT_USABLE — macro age=%.1fh (≤72h), last known data retained',
+                age_h,
+            )
 
     if dominance is None:
         block_reasons.append('DOMINANCE_DATA_MISSING')
@@ -134,6 +142,7 @@ def get_market_context() -> dict:
         'kimp':                 kimp,
         'btc_weekly_200_above': btc_weekly_200_above,
         'is_tradeable':         is_tradeable,
+        'stale_but_usable':     stale_but_usable,
         'block_reasons':        block_reasons,
     }
 

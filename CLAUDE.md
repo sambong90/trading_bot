@@ -223,6 +223,27 @@ kubectl rollout status deployment/trading-bot -n quant-bot
 - **Panic Dip-Buy**: FNG ≤ 20 (Extreme Fear) + RSI ≤ 30 또는 BB하단 터치 시 발동
 - **BUY_COOLDOWN_MINUTES**: 60분
 
+## DYN_THR 장세별 차등 정책 (2026-05-19~)
+
+Dynamic Signal Threshold는 GuardianResult.regime에 따라 차등 적용된다. 구현: `config.DYN_THR_BY_REGIME`.
+
+- BULL_CLIMAX: 0.50 / BULL_CONFIRMED: 0.55 / BULL_EARLY: 0.60
+- SIDEWAYS: 0.75 / BEAR_WARNING: 0.85 / BEAR_CONFIRMED: 0.90 / UNKNOWN: 1.00
+
+연속 손실 streak 페널티(+0.02/회)는 기존과 동일하게 위 base에 누적 적용.  
+긴급 오버라이드: 환경변수 `DYN_THR_OVERRIDE` (전체 장세 무시, 단일값 강제).
+
+DYN_THR 차단 시 ai_events에 SKIP 이벤트 기록 (`extra.dyn_thr`, `extra.strength` 포함) → `analytics.py`로 장세별 차단율 추적 가능.
+
+## MacroSnapshot STALE_BUT_USABLE 정책 (2026-05-19~)
+
+macro 데이터 나이 기준:
+- ≤ 26h: fresh — 정상 운영
+- 26h~72h: STALE_BUT_USABLE — L1/L2 평가는 진행하되 buy_size_multiplier 0.5 적용
+- > 72h: RATIO_STALE_EM7 — is_tradeable=False, 매수 전면 차단
+
+이전의 평일(26h)/주말(72h) 이분법을 통합. 주말에도 72h 이내이면 STALE_BUT_USABLE로 거래 허용.
+
 ## 주요 버그 수정 이력 (재발 방지)
 
 1. **count_open_positions 오버카운트**: `_balance_cache` 전체 non-KRW를 카운트하여 MAX_OPEN_POSITIONS 가짜 도달 → 봇 관리 티커만 카운트하도록 수정 (2026-03-13)

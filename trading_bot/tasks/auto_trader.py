@@ -434,7 +434,7 @@ def calculate_dynamic_size(total_equity, current_price, atr, size_pct, is_global
     return float(final_buy_krw), float(risk_pct), float(sl_distance)
 
 
-def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_market=True, fng_value=50):
+def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_market=True, fng_value=50, guardian_regime='UNKNOWN'):
     """
     티커 1개 분석 후 신호 처리.
     defer_buy=True(투패스 모드)일 때: sell은 즉시 실행, buy는 실행하지 않고 ('pending_buy', reason, data) 반환.
@@ -657,14 +657,28 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
 
     # v7: 매수 진입 필터 (Dynamic Threshold + EMA + RSI)
     if signal == 'buy':
-        # Dynamic Signal Threshold — 연속 손실 streak에 비례해 진입 임계값 상향
+        # Dynamic Signal Threshold — 장세별 base + 연속 손실 streak 페널티
         try:
             from trading_bot.risk import get_system_state as _gss_dyn
+            from trading_bot.config import DYN_THR_BY_REGIME, DYN_THR_OVERRIDE
             _consec = int(_gss_dyn('consec_losses', '0') or 0)
-            _dyn_thr = min(DYNAMIC_THR_MAX, DYNAMIC_THR_BASE + _consec * DYNAMIC_THR_PENALTY)
+            _regime_base = (DYN_THR_OVERRIDE if DYN_THR_OVERRIDE is not None
+                            else DYN_THR_BY_REGIME.get(guardian_regime, DYNAMIC_THR_BASE))
+            _dyn_thr = min(DYNAMIC_THR_MAX, _regime_base + _consec * DYNAMIC_THR_PENALTY)
             if _max_strength < _dyn_thr:
-                ai_logger.info('[SKIP] %s | DYN_THR | str=%.2f thr=%.2f streak=%d',
-                               ticker, _max_strength, _dyn_thr, _consec)
+                ai_logger.info('[SKIP] %s | DYN_THR | str=%.2f thr=%.2f streak=%d regime=%s',
+                               ticker, _max_strength, _dyn_thr, _consec, guardian_regime)
+                try:
+                    from trading_bot.ai_logger import log_ai_event
+                    log_ai_event(
+                        event_type='SKIP', ticker=ticker, signal='buy',
+                        regime=guardian_regime,
+                        decision_reason=f'DYN_THR({_dyn_thr:.2f}):str={_max_strength:.2f}',
+                        extra={'dyn_thr': _dyn_thr, 'strength': round(_max_strength, 3),
+                               'consec_losses': _consec},
+                    )
+                except Exception:
+                    pass
                 return 'skip', f'DYN_THR({_dyn_thr:.2f}):str={_max_strength:.2f}', None
         except Exception:
             pass
@@ -1198,7 +1212,7 @@ def run_cycle(mode):
     try:
         for ticker in tickers:
             try:
-                out = analyze_ticker(ticker, executor, mode, defer_buy=True, is_global_bull_market=is_global_bull_market, fng_value=fng_value)
+                out = analyze_ticker(ticker, executor, mode, defer_buy=True, is_global_bull_market=is_global_bull_market, fng_value=fng_value, guardian_regime=guardian_result.regime if guardian_result else 'UNKNOWN')
                 status = out[0]
                 reason = out[1] if len(out) > 1 else None
                 data = out[2] if len(out) > 2 else None
