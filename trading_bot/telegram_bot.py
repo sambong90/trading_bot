@@ -239,20 +239,11 @@ def cmd_status() -> str:
                            else ('🚨 데이터 없음' if brs else 'NORMAL')))
         lines.append(f'매크로: {macro_str}')
 
-        # Regime from latest AiEvent
+        # Regime from SystemState (guardian global regime, not per-ticker)
         try:
-            from trading_bot.db import get_session
-            from trading_bot.models import AiEvent
             from trading_bot.config import DYN_THR_BY_REGIME
             from trading_bot.risk import get_system_state
-            _s = get_session()
-            try:
-                _rv = _s.query(AiEvent).filter(
-                    AiEvent.regime.isnot(None)
-                ).order_by(AiEvent.ts.desc()).limit(1).first()
-            finally:
-                _s.close()
-            regime = _rv.regime if _rv else 'UNKNOWN'
+            regime = get_system_state('last_guardian_regime', 'UNKNOWN') or 'UNKNOWN'
             _cap_map = {'BEAR_CONFIRMED': 0, 'BEAR_WARNING': 0, 'SIDEWAYS': 20,
                         'BULL_EARLY': 50, 'BULL_CONFIRMED': 70, 'BULL_CLIMAX': 80}
             cap = _cap_map.get(regime, 0)
@@ -426,57 +417,65 @@ def cmd_today() -> str:
             lines.append('오늘 이벤트 없음')
             return '\n'.join(lines)
 
+        _TRADE_EVENTS = ('EXECUTE', 'STOP_LOSS', 'SCALE_OUT', 'DCA')
         _EVENT_ICON = {
-            'EXECUTE': '✅',
-            'SKIP':    '⏭',
-            'STOP_LOSS': '🛑',
-            'SCALE_OUT': '📤',
-            'DCA':     '🔄',
-            'ERROR':   '⚠️',
-            'STRATEGY': '📊',
+            'EXECUTE': '✅', 'STOP_LOSS': '🛑', 'SCALE_OUT': '📤', 'DCA': '🔄',
         }
-        for e in events:
-            ev   = e['event']
-            sig  = e['signal']
-            tick = html.escape(e['ticker'].replace('KRW-', '') if e['ticker'] else '-')
-            icon = _EVENT_ICON.get(ev, '•')
-            ts_str = e['ts'].strftime('%H:%M')
 
-            # 이벤트 타입 레이블
-            if ev == 'EXECUTE' and sig == 'buy':
-                label = '매수'
-            elif ev == 'EXECUTE' and sig == 'sell':
-                label = '매도'
-            elif ev == 'SKIP':
-                label = 'SKIP'
-            elif ev == 'STOP_LOSS':
-                label = '손절'
-            elif ev == 'SCALE_OUT':
-                label = '분할매도'
-            elif ev == 'DCA':
-                label = 'DCA'
-            elif ev == 'STRATEGY':
-                continue  # 전략 분석은 상세 내역에서 제외
-            else:
-                label = ev
+        # 실제 체결 이벤트만 상세 출력 (SKIP/STRATEGY 제외)
+        trades = [e for e in events if e['event'] in _TRADE_EVENTS]
+        skips  = [e for e in events if e['event'] == 'SKIP']
 
-            reason = e['decision_reason']
-            reason_short = html.escape(reason[:40]) if reason else ''
+        if trades:
+            for e in trades:
+                ev  = e['event']
+                sig = e['signal']
+                tick = html.escape(e['ticker'].replace('KRW-', '') if e['ticker'] else '-')
+                icon = _EVENT_ICON.get(ev, '•')
+                ts_str = e['ts'].strftime('%H:%M')
 
-            roi_str = ''
-            if e['roi_pct'] is not None:
-                roi_icon = '🟢' if e['roi_pct'] >= 0 else '🔴'
-                roi_str = f'  {roi_icon} {e["roi_pct"]:+.1f}%'
+                if ev == 'EXECUTE' and sig == 'buy':
+                    label = '매수'
+                elif ev == 'EXECUTE' and sig == 'sell':
+                    label = '매도'
+                elif ev == 'STOP_LOSS':
+                    label = '손절'
+                elif ev == 'SCALE_OUT':
+                    label = '분할매도'
+                elif ev == 'DCA':
+                    label = 'DCA'
+                else:
+                    label = ev
 
-            price_str = ''
-            if e['price']:
-                price_str = f'  {_fmt_krw(e["price"])}'
+                roi_str = ''
+                if e['roi_pct'] is not None:
+                    roi_icon = '🟢' if e['roi_pct'] >= 0 else '🔴'
+                    roi_str = f'  {roi_icon} {e["roi_pct"]:+.1f}%'
 
-            lines.append(f'{ts_str} {icon} <code>{tick}</code> {label}{price_str}{roi_str}')
-            if reason_short:
-                lines.append(f'  └ {reason_short}')
+                price_str = f'  {_fmt_krw(e["price"])}' if e['price'] else ''
+                reason_short = html.escape((e['decision_reason'] or '')[:40])
+
+                lines.append(f'{ts_str} {icon} <code>{tick}</code> {label}{price_str}{roi_str}')
+                if reason_short:
+                    lines.append(f'  └ {reason_short}')
+        else:
+            lines.append('오늘 체결 없음')
+
+        # SKIP 요약 (개별 출력 대신 집계)
+        if skips:
+            lines.append('')
+            lines.append(f'⏭ DYN_THR 차단: <b>{len(skips)}건</b>')
+            blocked_tickers = list(dict.fromkeys(
+                e['ticker'].replace('KRW-', '') for e in skips if e['ticker']
+            ))[:10]
+            if blocked_tickers:
+                ticker_str = ' '.join(
+                    f'<code>{html.escape(t)}</code>' for t in blocked_tickers
+                )
+                lines.append(f'주요: {ticker_str}')
+
     except Exception as _e:
-        lines.append(f'조회 실패: {html.escape(str(_e)[:80])}')
+        lines.append(f'조회 실패: {html.escape(str(_e)[:100])}')
     return '\n'.join(lines)
 
 
@@ -1012,8 +1011,6 @@ def send_daily_briefing(chat_id: str = None) -> bool:
         from trading_bot.collectors.aggregator import get_market_context
         from trading_bot.config import DYN_THR_BY_REGIME
         from trading_bot.risk import get_system_state
-        from trading_bot.db import get_session
-        from trading_bot.models import AiEvent
         ctx = get_market_context()
         tradeable = ctx.get('is_tradeable', False)
         stale     = ctx.get('stale_but_usable', False)
@@ -1022,12 +1019,7 @@ def send_daily_briefing(chat_id: str = None) -> bool:
         lines.append(f'L1: {l1}')
         macro_str = '⚠️ STALE' if stale else ('🚨 EM7' if brs else 'NORMAL')
         lines.append(f'매크로: {macro_str}')
-        _s = get_session()
-        try:
-            _rv = _s.query(AiEvent).filter(AiEvent.regime.isnot(None)).order_by(AiEvent.ts.desc()).limit(1).first()
-        finally:
-            _s.close()
-        regime = _rv.regime if _rv else 'UNKNOWN'
+        regime = get_system_state('last_guardian_regime', 'UNKNOWN') or 'UNKNOWN'
         _cap_map = {'BEAR_CONFIRMED': 0, 'BEAR_WARNING': 0, 'SIDEWAYS': 20,
                     'BULL_EARLY': 50, 'BULL_CONFIRMED': 70, 'BULL_CLIMAX': 80}
         cap = _cap_map.get(regime, 0)
@@ -1169,7 +1161,7 @@ def main():
             for chat_id, from_user_id, text in updates:
                 reply = handle_message(text, chat_id, from_user_id)
                 if reply:
-                    _send(reply, chat_id=chat_id)
+                    _send_multipart(reply, chat_id=chat_id)
         except KeyboardInterrupt:
             break
         except Exception as e:

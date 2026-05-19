@@ -11,6 +11,11 @@ _UTC = timezone.utc
 _EXIT_EVENTS = ('STOP_LOSS', 'SCALE_OUT', 'DCA')
 _TRADE_EVENTS = ('EXECUTE', 'STOP_LOSS', 'SCALE_OUT', 'DCA')
 
+_GUARDIAN_REGIMES = frozenset({
+    'BULL_CLIMAX', 'BULL_CONFIRMED', 'BULL_EARLY',
+    'SIDEWAYS', 'BEAR_WARNING', 'BEAR_CONFIRMED', 'NO_TRADE', 'UNKNOWN',
+})
+
 _RULE_KEYWORDS = [
     'PANIC_DIP', 'DRAGON', 'LOYALTY',
     'FIB_618', 'FIB_786', 'FIB_EXT', 'FIB',
@@ -352,7 +357,7 @@ def get_regime_history(days: int = 7) -> list[dict]:
     timeline = []
     last_regime = None
     for r in rows:
-        if r.regime and r.regime != last_regime:
+        if r.regime and r.regime in _GUARDIAN_REGIMES and r.regime != last_regime:
             timeline.append({'ts': r.ts.astimezone(KST), 'regime': r.regime})
             last_regime = r.regime
     return timeline
