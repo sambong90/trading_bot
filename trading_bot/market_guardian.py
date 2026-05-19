@@ -190,6 +190,22 @@ class MarketGuardian:
             buy_size_multiplier, flags or 'none',
         )
 
+        # ── 장세 전환 감지 → 텔레그램 즉시 알림 ──────────────────────────────
+        try:
+            from trading_bot.risk import get_system_state, set_system_state
+            last_regime = get_system_state('last_guardian_regime', '') or ''
+            if last_regime and last_regime != regime:
+                from trading_bot.config import DYN_THR_BY_REGIME
+                dyn_thr = DYN_THR_BY_REGIME.get(regime, 1.0)
+                try:
+                    from trading_bot.telegram_bot import notify_regime_change
+                    notify_regime_change(last_regime, regime, position_cap, dyn_thr)
+                except Exception:
+                    pass
+            set_system_state('last_guardian_regime', regime)
+        except Exception:
+            pass
+
         return GuardianResult(
             tradeable=True,
             regime=regime,

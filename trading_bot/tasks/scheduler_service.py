@@ -376,6 +376,16 @@ def run_auto_tuner() -> None:
     _run_subprocess(AUTO_TUNER_CMD, 'auto_tuner', timeout_seconds=1800)
 
 
+def run_daily_briefing() -> None:
+    """일일 브리핑 — 09:01 KST 발송. 전일 성과 + 장세 + 포트폴리오 요약."""
+    try:
+        from trading_bot.telegram_bot import send_daily_briefing
+        send_daily_briefing()
+        _log('[스케줄러] daily_briefing 발송 완료')
+    except Exception as e:
+        _log(f'[스케줄러] daily_briefing 실패: {e}', 'warning')
+
+
 def run_market_briefing() -> None:
     """Periodic Market Briefing: BTC 추세, 계좌·ROI, 24h P&L, ADX 상위 3 -> Telegram."""
     # 파드 재시작 시 동일 시간대 중복 발송 방지: DB에 발송 이력 원자적 기록
@@ -527,6 +537,11 @@ sched.add_job(
     id='market_briefing',
 )
 _log('Market Briefing 스케줄 등록 (09:00 + 4시간마다)')
+
+# 일일 브리핑: 매일 09:01 KST (market_briefing 직후, 전일 요약 + 장세 + 포트폴리오)
+sched.add_job(run_daily_briefing, 'cron', hour=9, minute=1, id='daily_briefing',
+              misfire_grace_time=120)
+_log('일일 브리핑 스케줄 등록 (매일 09:01 KST)')
 
 # Heartbeat: 5분마다 (외부 모니터링용)
 sched.add_job(_write_heartbeat, 'interval', minutes=5, id='heartbeat')

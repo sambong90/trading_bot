@@ -231,3 +231,179 @@ def get_full_report(summary_days: int = 7, rule_days: int = 30, risk_days: int =
         'risk': get_risk_metrics(risk_days),
         'hourly': get_hourly_analysis(risk_days),
     }
+
+
+def get_today_events() -> list[dict]:
+    """KST 기준 오늘 ai_events 시간순 반환."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    today = datetime.now(KST).date()
+    start = datetime(today.year, today.month, today.day, tzinfo=KST).astimezone(_UTC)
+    end = start + timedelta(days=1)
+    session = get_session()
+    try:
+        rows = session.query(AiEvent).filter(
+            AiEvent.ts >= start,
+            AiEvent.ts < end,
+        ).order_by(AiEvent.ts).all()
+        return [
+            {
+                'ts': r.ts.astimezone(KST),
+                'event': r.event or '',
+                'ticker': r.ticker or '',
+                'signal': r.signal or '',
+                'price': r.price,
+                'roi_pct': r.roi_pct,
+                'position_size_krw': r.position_size_krw,
+                'regime': r.regime or '',
+                'decision_reason': r.decision_reason or '',
+                'extra': r.extra or {},
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+def get_dyn_thr_stats_today() -> dict:
+    """오늘 SKIP / EXECUTE(buy) / 매도 건수 및 실현 ROI 합계."""
+    events = get_today_events()
+    skips   = [e for e in events if e['event'] == 'SKIP'    and e['signal'] == 'buy']
+    buys    = [e for e in events if e['event'] == 'EXECUTE' and e['signal'] == 'buy']
+    sells   = [e for e in events if e['event'] in _EXIT_EVENTS
+               or (e['event'] == 'EXECUTE' and e['signal'] == 'sell')]
+    roi_sum = sum(e['roi_pct'] or 0.0 for e in sells if e['roi_pct'] is not None)
+    return {
+        'skip_count': len(skips),
+        'buy_count':  len(buys),
+        'sell_count': len(sells),
+        'realized_roi_sum': round(roi_sum, 2),
+    }
+
+
+def get_recent_signals(hours: int = 6) -> dict:
+    """최근 N시간 신호 요약 — buy/sell 내역 + pattern strength Top3."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    since = datetime.now(_UTC) - timedelta(hours=hours)
+    session = get_session()
+    try:
+        rows = session.query(AiEvent).filter(
+            AiEvent.ts >= since,
+        ).order_by(AiEvent.ts.desc()).all()
+    finally:
+        session.close()
+
+    analyzed: set = set()
+    buy_pass, buy_block, sell_list = [], [], []
+    strength_items: list = []
+
+    for r in rows:
+        if r.ticker:
+            analyzed.add(r.ticker)
+        extra = r.extra or {}
+        if r.event == 'EXECUTE' and r.signal == 'buy':
+            buy_pass.append(r.ticker or '')
+            st = float(extra.get('max_pattern_strength', 0.0) or 0.0)
+            if st > 0:
+                strength_items.append((r.ticker or '', st))
+        elif r.event == 'SKIP' and r.signal == 'buy':
+            buy_block.append(r.ticker or '')
+            st = float(extra.get('strength', 0.0) or 0.0)
+            if st > 0:
+                strength_items.append((r.ticker or '', st))
+        elif r.event in _EXIT_EVENTS or (r.event == 'EXECUTE' and r.signal == 'sell'):
+            sell_list.append(r.ticker or '')
+
+    strength_items.sort(key=lambda x: -x[1])
+    seen: set = set()
+    top3 = []
+    for t, s in strength_items:
+        if t and t not in seen:
+            seen.add(t)
+            top3.append((t, round(s, 3)))
+        if len(top3) >= 3:
+            break
+
+    return {
+        'hours': hours,
+        'analyzed_count': len(analyzed),
+        'buy_pass':  list(dict.fromkeys(b for b in buy_pass  if b)),
+        'buy_block': list(dict.fromkeys(b for b in buy_block if b)),
+        'sell_list': list(dict.fromkeys(s for s in sell_list  if s)),
+        'strength_top3': top3,
+    }
+
+
+def get_regime_history(days: int = 7) -> list[dict]:
+    """최근 N일 regime 전환 타임라인 (연속 중복 제거)."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    since = datetime.now(_UTC) - timedelta(days=days)
+    session = get_session()
+    try:
+        rows = session.query(AiEvent).filter(
+            AiEvent.ts >= since,
+            AiEvent.regime.isnot(None),
+        ).order_by(AiEvent.ts).all()
+    finally:
+        session.close()
+
+    timeline = []
+    last_regime = None
+    for r in rows:
+        if r.regime and r.regime != last_regime:
+            timeline.append({'ts': r.ts.astimezone(KST), 'regime': r.regime})
+            last_regime = r.regime
+    return timeline
+
+
+def get_weekly_dyn_thr_by_day(days: int = 7) -> dict:
+    """일별 SKIP / EXECUTE(buy) 건수 (DYN_THR 통과율 추적용)."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    since = datetime.now(_UTC) - timedelta(days=days)
+    session = get_session()
+    try:
+        rows = session.query(AiEvent).filter(
+            AiEvent.ts >= since,
+            AiEvent.event.in_(('SKIP', 'EXECUTE')),
+            AiEvent.signal == 'buy',
+        ).all()
+    finally:
+        session.close()
+
+    result: dict = {}
+    for r in rows:
+        day = r.ts.astimezone(KST).date().isoformat()
+        entry = result.setdefault(day, {'skip': 0, 'execute': 0})
+        if r.event == 'SKIP':
+            entry['skip'] += 1
+        elif r.event == 'EXECUTE':
+            entry['execute'] += 1
+    return result
+
+
+def get_best_worst_trades(days: int = 7) -> dict:
+    """최근 N일 최고 수익 / 최대 손실 청산 트레이드."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    since = datetime.now(_UTC) - timedelta(days=days)
+    session = get_session()
+    try:
+        exits = session.query(AiEvent).filter(
+            AiEvent.ts >= since,
+            AiEvent.event.in_(_EXIT_EVENTS),
+            AiEvent.roi_pct.isnot(None),
+        ).all()
+    finally:
+        session.close()
+
+    if not exits:
+        return {}
+    best  = max(exits, key=lambda r: r.roi_pct)
+    worst = min(exits, key=lambda r: r.roi_pct)
+    return {
+        'best':  {'ticker': best.ticker,  'roi_pct': round(best.roi_pct, 2),  'ts': best.ts.astimezone(KST)},
+        'worst': {'ticker': worst.ticker, 'roi_pct': round(worst.roi_pct, 2), 'ts': worst.ts.astimezone(KST)},
+    }
