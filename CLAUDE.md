@@ -250,3 +250,6 @@ macro 데이터 나이 기준:
 2. **수동 매수 시 CB 오발동**: `compute_total_account_equity`가 수동 매수 자산 미포함 → 계좌 전체 자산 포함하도록 수정 (2026-03-13)
 3. **매수 직후 CB 오발동**: Upbit 정산 딜레이로 `_balance_cache`에 매수 자산 미반영 → `_pending_buy_costs`로 equity 보정 (2026-03-15)
 4. **CB 50% 매도 최소금액 에러**: `under_min_total_market_ask` → 매도 전 5000원 미만 체크 추가
+5. **PatternRecognizer 불완전 캔들**: `get_ohlcv(minute60)`이 HH:01 시점에 1분치 진행 중 캔들을 마지막 행으로 포함 → `vol_ratio≈0.01`로 DRAGON/LOYALTY 항상 실패, SIEGE 허위 감지. `PatternRecognizer.__init__`에서 `df.iloc[:-1]` 제거 (2026-05-19)
+6. **SIEGE 1h 타임프레임 오적용**: `_SIEGE_MIN_CANDLES_1D=7`(일봉 상수)이 1h에도 적용되어 7시간 횡보로 조건 낮아짐 → `_SIEGE_MIN_CANDLES_1H=168` 추가, 타임프레임별 분기 (2026-05-19)
+7. **_max_strength에 sell 패턴 포함**: ABANDONMENT/DRAGON_BEAR의 strength가 buy conviction 판단에 혼입 → buy 신호만 집계하도록 수정 (2026-05-19)

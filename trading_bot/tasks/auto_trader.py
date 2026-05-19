@@ -493,7 +493,7 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
         logger.debug('[PatternRecognizer] %s 실패 (무시): %s', ticker, _pe)
 
     # ── Phase 4: Conviction 지표 추출 ────────────────────────────────────────
-    _max_strength = max((_ps.strength for _ps in _signals), default=0.0)
+    _max_strength = max((_ps.strength for _ps in _signals if _ps.signal == 'buy'), default=0.0)
     _is_dragon_strong  = any('DRAGON_STRONG'      in getattr(_ps, 'label', '') for _ps in _signals)
     _is_loyalty_strong = any('LOYALTY_PASS_STRONG' in getattr(_ps, 'label', '') for _ps in _signals)
     _high_conviction   = _max_strength >= 0.85 or (_is_dragon_strong and _is_loyalty_strong)

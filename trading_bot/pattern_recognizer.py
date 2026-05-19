@@ -83,6 +83,7 @@ _HDIV_MIN_GAP    = 3    # 두 저점 사이 최소 캔들 수
 # TS-7 매물대 포위전 (Section 15)
 # ────────────────────────────────────────────────────────────────────────────
 _SIEGE_MIN_CANDLES_4H = 42   # 7일 × 6(4h봉/일)
+_SIEGE_MIN_CANDLES_1H = 168  # 7일 × 24(1h봉/일)
 _SIEGE_MIN_CANDLES_1D = 7
 _SIEGE_ZONE_PCT       = 0.03  # 가격 범위 ±3% = "같은 구간"으로 간주
 
@@ -242,7 +243,9 @@ class PatternRecognizer:
     """
 
     def __init__(self, df: pd.DataFrame, timeframe: str = 'minute60'):
-        self.df = df
+        # pyupbit get_ohlcv는 현재 진행 중인 불완전 캔들을 마지막 행으로 포함.
+        # 패턴 분석에는 완성된 캔들만 사용한다.
+        self.df = df.iloc[:-1].copy() if df is not None and len(df) > 1 else df
         self.timeframe = timeframe
         self._tf_label = '4h' if '240' in timeframe or '4h' in timeframe else (
             '1d' if 'day' in timeframe else '1h'
@@ -776,7 +779,13 @@ class PatternRecognizer:
         VolSlope  = (avg_vol[-3:] - avg_vol[-7:-3]) / avg_vol[-7:-3] < 0
         """
         is_4h = 'minute240' in self.timeframe or '4h' in self.timeframe
-        min_c = _SIEGE_MIN_CANDLES_4H if is_4h else _SIEGE_MIN_CANDLES_1D
+        is_1h = 'minute60' in self.timeframe or '1h' in self.timeframe
+        if is_4h:
+            min_c = _SIEGE_MIN_CANDLES_4H
+        elif is_1h:
+            min_c = _SIEGE_MIN_CANDLES_1H
+        else:
+            min_c = _SIEGE_MIN_CANDLES_1D
         lb    = max(min_c + 5, _CRAWL_LOOKBACK)
 
         if len(self._closes) < lb:
