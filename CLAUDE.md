@@ -253,3 +253,5 @@ macro 데이터 나이 기준:
 5. **PatternRecognizer 불완전 캔들**: `get_ohlcv(minute60)`이 HH:01 시점에 1분치 진행 중 캔들을 마지막 행으로 포함 → `vol_ratio≈0.01`로 DRAGON/LOYALTY 항상 실패, SIEGE 허위 감지. `PatternRecognizer.__init__`에서 `df.iloc[:-1]` 제거 (2026-05-19)
 6. **SIEGE 1h 타임프레임 오적용**: `_SIEGE_MIN_CANDLES_1D=7`(일봉 상수)이 1h에도 적용되어 7시간 횡보로 조건 낮아짐 → `_SIEGE_MIN_CANDLES_1H=168` 추가, 타임프레임별 분기 (2026-05-19)
 7. **_max_strength에 sell 패턴 포함**: ABANDONMENT/DRAGON_BEAR의 strength가 buy conviction 판단에 혼입 → buy 신호만 집계하도록 수정 (2026-05-19)
+8. **PositionState.avg_buy_price 항상 0**: `update_trailing_high()`가 새 레코드를 avg=0으로 생성 + 이후 `set_scale_out_stage()` 미호출 → 매수 직후 `set_scale_out_stage(ticker, 0, fill_price)` 추가. 근거: HYPER/NEAR 모두 avg=0으로 count_open_positions=0, analytics 오표시 (2026-05-20)
+9. **HARD/TRAIL STOP 매도 ai_events 누락**: `analyze_ticker()` HARD STOP, TRAIL STOP 경로 및 Pass 0 `check_hard_stop_loss()` 이후 `log_ai_event()` + `log_execution_event()` 미호출 → 3개 경로에 STOP_LOSS/SCALE_OUT 이벤트 기록 추가. 누락 시 `sync_manual_trades()`가 MANUAL_SELL로 오분류 (2026-05-20)
