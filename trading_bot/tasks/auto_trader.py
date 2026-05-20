@@ -525,9 +525,25 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                     reset_trailing_peak(ticker)
                     return 'hold', _exit.reason, None
                 ai_logger.info('[EXIT:HARD] %s | reason=%s', ticker, _exit.reason)
-                executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker)
+                fill_price_hs = executor.place_order('sell', current_price, size_pct=1.0, ticker=ticker) or current_price
                 reset_trailing_peak(ticker)
+                get_scale_out_state(ticker, 0.0, 0.0)
                 _update_consec_losses(current_roi)
+                try:
+                    from trading_bot.ai_logger import log_ai_event
+                    log_ai_event(
+                        event_type='STOP_LOSS', ticker=ticker, signal='sell',
+                        price=fill_price_hs, avg_buy_price=float(avg_buy_price or 0),
+                        decision_reason=_exit.reason, roi=current_roi,
+                        timeframe=DEFAULT_INTERVAL,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from trading_bot.balanced_plus import log_execution_event as _le_hs, TAG_EXEC_SELL as _tes_hs
+                    _le_hs(ticker, 'sell', _tes_hs, fill_price_hs or current_price)
+                except Exception:
+                    pass
                 return 'executed', _exit.reason, None
         except Exception as _ee:
             logger.debug('[ExitSignal] %s 실패(무시): %s', ticker, _ee)
@@ -538,8 +554,23 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             if _trail_sell:
                 logger.info('[TRAIL STOP] %s | %s', ticker, _trail_reason)
                 ai_logger.info('[EXIT:TRAIL] %s | reason=%s', ticker, _trail_reason)
-                executor.place_order('sell', current_price, size_pct=0.5, ticker=ticker)
+                fill_price_ts = executor.place_order('sell', current_price, size_pct=0.5, ticker=ticker) or current_price
                 _update_consec_losses(current_roi)
+                try:
+                    from trading_bot.ai_logger import log_ai_event
+                    log_ai_event(
+                        event_type='SCALE_OUT', ticker=ticker, signal='sell',
+                        price=fill_price_ts, avg_buy_price=float(avg_buy_price or 0),
+                        decision_reason=_trail_reason, roi=current_roi,
+                        timeframe=DEFAULT_INTERVAL,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from trading_bot.balanced_plus import log_execution_event as _le_ts, TAG_EXEC_SELL as _tes_ts
+                    _le_ts(ticker, 'sell', _tes_ts, fill_price_ts or current_price)
+                except Exception:
+                    pass
                 return 'executed', _trail_reason, None
         except Exception as _te:
             logger.debug('[TrailingStop] %s 실패(무시): %s', ticker, _te)
@@ -631,7 +662,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 position_value_dca = (current_price or 0) * pos
                 if position_value_dca >= MIN_ORDER_KRW and (ACCOUNT_VALUE * dca_pct) >= MIN_ORDER_KRW:
                     try:
-                        executor.place_order('buy', current_price, size_pct=dca_pct, ticker=ticker)
+                        fill_price_dca = executor.place_order('buy', current_price, size_pct=dca_pct, ticker=ticker) or current_price
+                        try:
+                            set_scale_out_stage(ticker, 0, float(fill_price_dca or current_price))
+                        except Exception:
+                            pass
                         logger.info('✅ %s DCA 매수 실행 (ROI %.1f%%, 비중 %.2f%%)', ticker, current_roi, dca_pct * 100)
                         ai_logger.info('[EXECUTE] %s | ACTION:BUY | DCA_BUY | ROI:%.1f%%', ticker, current_roi)
                         if not log_execution_event(ticker, 'buy', TAG_DCA_BUY, current_price):
@@ -726,7 +761,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 'fib_retrace': _fib_retrace,
             }
         try:
-            executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker)
+            fill_price_buy = executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker) or current_price
+            try:
+                set_scale_out_stage(ticker, 0, float(fill_price_buy or current_price))
+            except Exception:
+                pass
             try:
                 from trading_bot.risk import reset_trailing_peak
                 reset_trailing_peak(ticker)
@@ -1062,6 +1101,22 @@ def run_cycle(mode):
                             logger.info('[HARD STOP-LOSS] %s 트리거 — 전량 매도 실행됨', t)
                             ai_logger.info('[EXECUTE] %s | ACTION:SELL | REASON:HARD_STOP_LOSS', t)
                             stats['executed'] = stats.get('executed', 0) + 1
+                            try:
+                                _hs_avg = executor.get_avg_buy_price(t) or 0.0
+                                _hs_roi = ((cur_p - _hs_avg) / _hs_avg * 100) if _hs_avg > 0 else 0.0
+                                from trading_bot.ai_logger import log_ai_event as _lae_hs
+                                _lae_hs(
+                                    event_type='STOP_LOSS', ticker=t, signal='sell',
+                                    price=cur_p, avg_buy_price=float(_hs_avg),
+                                    decision_reason='HARD_STOP_LOSS', roi=_hs_roi,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                from trading_bot.balanced_plus import log_execution_event as _le_p0, TAG_EXEC_SELL as _tes_p0
+                                _le_p0(t, 'sell', _tes_p0, cur_p)
+                            except Exception:
+                                pass
             executor.refresh_balance_cache()  # 스탑로스 후 잔고 갱신
         except Exception as e:
             logger.warning('[HARD STOP-LOSS] 체크 중 오류 (계속 진행): %s', e)

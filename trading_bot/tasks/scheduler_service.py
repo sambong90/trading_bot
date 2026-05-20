@@ -570,6 +570,8 @@ if __name__ == '__main__':
     start_telegram_bot()
     sched.start()
     _write_heartbeat()
+    for _job in sched.get_jobs():
+        _log(f'[JOB] {_job.id}: next_run={_job.next_run_time}')
 
     try:
         from trading_bot.risk import get_system_state as _gss_boot
