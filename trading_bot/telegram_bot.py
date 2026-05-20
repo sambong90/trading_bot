@@ -690,7 +690,16 @@ def cmd_guardian() -> str:
         lines += ['', '<b>데이터 신선도</b>']
         ts = macro.get('ts')
         if ts:
-            lines.append(f'macro 최종 수집: {html.escape(str(ts)[:16])} ({_time_ago_str(str(ts)[:19])})')
+            from zoneinfo import ZoneInfo as _ZI
+            _kst = _ZI('Asia/Seoul')
+            if isinstance(ts, str):
+                _ts_dt = datetime.fromisoformat(ts)
+                if _ts_dt.tzinfo is None:
+                    _ts_dt = _ts_dt.replace(tzinfo=_ZI('UTC'))
+            else:
+                _ts_dt = ts
+            _ts_kst_str = _ts_dt.astimezone(_kst).strftime('%Y-%m-%d %H:%M')
+            lines.append(f'macro 최종 수집: {html.escape(_ts_kst_str)} ({_time_ago_str(_ts_dt)})')
         if stale:
             lines.append('⚠️ STALE_BUT_USABLE — 사이즈 ×0.5 적용')
         elif brs:
