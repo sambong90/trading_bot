@@ -294,17 +294,25 @@ def run_trading_cycle() -> None:
 # 데이터 수집 Job (collectors 패키지)
 # ---------------------------------------------------------------------------
 
-def collect_macro() -> None:
+_macro_consec_failures = 0   # None 반환 연속 카운터 (모듈 재시작 시 초기화)
+_dom_consec_failures   = 0   # None 반환 연속 카운터
+
+
+def collect_macro(is_retry: bool = False) -> None:
     """거시 지표 수집 (Yahoo Finance: DXY, NDX, Gold, Bond, JPY, Oil).
 
-    실행 주기: 매일 KST 07:00 — NYSE 정규장 종가 확정 후.
+    실행 주기: 미장(22~06시) 매시 + 07:00 / 13:00 / 19:00 KST — 총 12회/일.
     MacroSnapshot → DB 저장. ratio_quality='stale'이면 EM-7 트리거 차단.
+    None 반환(데이터 없음) 시 텔레그램 알림 + 30분 후 1회 자동 재시도.
     """
-    _log('[수집] collect_macro 실행')
+    global _macro_consec_failures
+    label = ' (재시도)' if is_retry else ''
+    _log(f'[수집] collect_macro 실행{label}')
     try:
         from trading_bot.collectors import macro as _macro
         result = _macro.collect()
         if result:
+            _macro_consec_failures = 0
             _log(
                 f'[수집] MacroSnapshot 완료 — '
                 f'ratio={result.get("nasdaq_dxy_ratio","?"):.1f} '
@@ -312,23 +320,50 @@ def collect_macro() -> None:
                 f'quality={result.get("ratio_quality","?")}'
             )
         else:
-            _log('[수집] collect_macro 실패 (None 반환)', 'warning')
+            _macro_consec_failures += 1
+            _log(f'[수집] collect_macro 실패 (None 반환, 누적 {_macro_consec_failures}회)', 'warning')
+            _notify_scheduler(f'⚠️ [Macro] 수집 실패: DXY/NDX 데이터 없음 (누적 {_macro_consec_failures}회)')
+            if not is_retry:
+                _schedule_macro_retry()
     except Exception as e:
+        _macro_consec_failures += 1
         _log(f'[수집] collect_macro 예외: {e}', 'error')
         _notify_scheduler(f'[collect_macro] 오류: {e}')
+        if not is_retry:
+            _schedule_macro_retry()
+
+
+def _schedule_macro_retry() -> None:
+    """collect_macro 30분 후 1회 재시도 예약."""
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        retry_time = _dt.now() + _td(minutes=30)
+        sched.add_job(
+            lambda: collect_macro(is_retry=True),
+            'date',
+            run_date=retry_time,
+            id='collect_macro_retry',
+            replace_existing=True,
+        )
+        _log('[수집] collect_macro 재시도 예약 (30분 후)')
+    except Exception as e:
+        _log(f'[수집] collect_macro 재시도 예약 실패: {e}', 'warning')
 
 
 def collect_dominance() -> None:
     """BTC/ETH 도미넌스 수집 (CoinGecko /global).
 
-    실행 주기: 0,4,8,12,16,20시 (4h 캔들 마감 직후).
+    실행 주기: 매시 HH:02 — 24회/일 (Guardian이 매 사이클 도미넌스를 읽으므로 1h 간격).
     DominanceSnapshot → DB 저장. event_signal로 임계값 크로스 감지.
+    3회 연속 실패 시 텔레그램 알림.
     """
+    global _dom_consec_failures
     _log('[수집] collect_dominance 실행')
     try:
         from trading_bot.collectors import dominance as _dom
         result = _dom.collect()
         if result:
+            _dom_consec_failures = 0
             _log(
                 f'[수집] DominanceSnapshot 완료 — '
                 f'BTC.D={result.get("btc_dominance","?"):.2f}% '
@@ -336,8 +371,12 @@ def collect_dominance() -> None:
                 f'event={result.get("event_signal") or "none"}'
             )
         else:
-            _log('[수집] collect_dominance 실패 (None 반환)', 'warning')
+            _dom_consec_failures += 1
+            _log(f'[수집] collect_dominance 실패 (None 반환, 누적 {_dom_consec_failures}회)', 'warning')
+            if _dom_consec_failures >= 3:
+                _notify_scheduler(f'⚠️ [Dominance] 수집 실패 {_dom_consec_failures}회 연속')
     except Exception as e:
+        _dom_consec_failures += 1
         _log(f'[수집] collect_dominance 예외: {e}', 'error')
         _notify_scheduler(f'[collect_dominance] 오류: {e}')
 
@@ -345,7 +384,7 @@ def collect_dominance() -> None:
 def collect_kimp() -> None:
     """김치프리미엄 수집 (Upbit + Binance REST).
 
-    실행 주기: 매시 auto_trader 직전 (CANDLE_SYNC_OFFSET_SEC 기반).
+    실행 주기: 4회/일 (00:00, 06:00, 12:00, 18:00 KST) — Guardian 미소비, 표시 전용.
     KimpSnapshot → DB 저장. kimp_signal로 역프/바닥 신호 감지.
     """
     _log('[수집] collect_kimp 실행')
@@ -362,6 +401,55 @@ def collect_kimp() -> None:
             _log('[수집] collect_kimp 실패 (None 반환)', 'warning')
     except Exception as e:
         _log(f'[수집] collect_kimp 예외: {e}', 'error')
+
+
+def collect_fng() -> None:
+    """Fear & Greed Index 수집 (alternative.me).
+
+    실행 주기: 4회/일 (00:30, 06:30, 12:30, 18:30 KST).
+    SentimentSnapshot → DB 저장. sentiment.py가 DB 우선 조회로 캐시 활용.
+    """
+    _log('[수집] collect_fng 실행')
+    try:
+        from trading_bot.collectors import sentiment as _senti
+        result = _senti.collect()
+        if result:
+            _log(
+                f'[수집] SentimentSnapshot 완료 — '
+                f'FNG={result.get("value","?"):.0f} '
+                f'label={result.get("label","?")}'
+            )
+        else:
+            _log('[수집] collect_fng 실패 (None 반환)', 'warning')
+            _notify_scheduler('⚠️ [FNG] 수집 실패 — live fallback으로 전환')
+    except Exception as e:
+        _log(f'[수집] collect_fng 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_fng] 오류: {e}')
+
+
+def collect_btc_weekly() -> None:
+    """BTC 주봉 200MA 수집 (pyupbit).
+
+    실행 주기: 매일 08:05 KST 1회.
+    BtcWeeklySnapshot → DB 저장. aggregator가 DB 우선 조회로 매 사이클 API 호출 제거.
+    """
+    _log('[수집] collect_btc_weekly 실행')
+    try:
+        from trading_bot.collectors import btc_weekly as _btc_w
+        result = _btc_w.collect()
+        if result:
+            _log(
+                f'[수집] BtcWeeklySnapshot 완료 — '
+                f'MA200={result.get("ma200","?"):.0f} '
+                f'price={result.get("current_price","?"):.0f} '
+                f'above={result.get("above_ma200","?")}'
+            )
+        else:
+            _log('[수집] collect_btc_weekly 실패 (None 반환)', 'warning')
+            _notify_scheduler('⚠️ [BTC_W200MA] 수집 실패 — live fallback으로 전환')
+    except Exception as e:
+        _log(f'[수집] collect_btc_weekly 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_btc_weekly] 오류: {e}')
 
 
 def run_db_maintenance() -> None:
@@ -501,21 +589,31 @@ else:
 
 # ── 데이터 수집 Job ─────────────────────────────────────────────────────────
 
-# 거시 지표 수집: 매일 KST 07:00 (NYSE 종가 확정 후)
-sched.add_job(collect_macro, 'cron', hour=7, minute=0, id='collect_macro',
-              misfire_grace_time=300)
-_log('거시 지표 수집 스케줄 등록 (매일 07:00 KST — Yahoo Finance)')
+# 거시 지표 수집: 미장(22~06시) 매시 + 07:00 / 13:00 / 19:00 — 총 12회/일
+# 미장 시간대 (22,23,0,1,2,3,4,5,6) + 평시 보완 (7,13,19)
+sched.add_job(collect_macro, 'cron', hour='22,23,0,1,2,3,4,5,6,7,13,19',
+              minute=0, id='collect_macro', misfire_grace_time=300)
+_log('거시 지표 수집 스케줄 등록 (12회/일 — 미장 매시 + 07:00/13:00/19:00 KST)')
 
-# 도미넌스 수집: 4h 주기 (0,4,8,12,16,20시) — 4h 캔들 마감 직후
-sched.add_job(collect_dominance, 'cron', hour='0,4,8,12,16,20', minute=2,
+# 도미넌스 수집: 매시 HH:02 — 24회/일 (Guardian 매 사이클 소비)
+sched.add_job(collect_dominance, 'cron', minute=2,
               id='collect_dominance', misfire_grace_time=120)
-_log('도미넌스 수집 스케줄 등록 (4h 주기 — CoinGecko)')
+_log('도미넌스 수집 스케줄 등록 (매시 02분 — 24회/일)')
 
-# 김치프리미엄 수집: 매시 auto_trader 직전 (_cron_minute - 1분, 최소 0분)
-_kimp_minute = max(0, _cron_minute - 1)
-sched.add_job(collect_kimp, 'cron', minute=_kimp_minute, second=0,
-              id='collect_kimp', misfire_grace_time=60)
-_log(f'김프 수집 스케줄 등록 (매시 {_kimp_minute:02d}분 — auto_trader 직전)')
+# 김치프리미엄 수집: 4회/일 (Guardian 미소비, 표시 전용)
+sched.add_job(collect_kimp, 'cron', hour='0,6,12,18', minute=0,
+              id='collect_kimp', misfire_grace_time=120)
+_log('김프 수집 스케줄 등록 (4회/일 — 00:00/06:00/12:00/18:00 KST)')
+
+# FNG 수집: 4회/일 (00:30, 06:30, 12:30, 18:30 KST)
+sched.add_job(collect_fng, 'cron', hour='0,6,12,18', minute=30,
+              id='collect_fng', misfire_grace_time=120)
+_log('FNG 수집 스케줄 등록 (4회/일 — HH:30 at 00/06/12/18 KST)')
+
+# BTC 주봉 200MA 수집: 매일 08:05 KST (전일 주봉 확정 후)
+sched.add_job(collect_btc_weekly, 'cron', hour=8, minute=5,
+              id='collect_btc_weekly', misfire_grace_time=300)
+_log('BTC 주봉 200MA 수집 스케줄 등록 (매일 08:05 KST)')
 
 # ── 기존 유지보수 Job ────────────────────────────────────────────────────────
 
@@ -570,8 +668,14 @@ if __name__ == '__main__':
     start_telegram_bot()
     sched.start()
     _write_heartbeat()
+    _log('=' * 60)
+    _log('등록된 스케줄 목록:')
+    _log(f'  {"작업":<25} {"다음 실행 (KST)"}')
+    _log(f'  {"-"*24} {"-"*22}')
     for _job in sched.get_jobs():
-        _log(f'[JOB] {_job.id}: next_run={_job.next_run_time}')
+        _nrt = _job.next_run_time.strftime('%m/%d %H:%M') if _job.next_run_time else 'N/A'
+        _log(f'  {_job.id:<25} {_nrt}')
+    _log('=' * 60)
 
     try:
         from trading_bot.risk import get_system_state as _gss_boot

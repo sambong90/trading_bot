@@ -377,3 +377,45 @@ class KimpSnapshot(Base):
     data_source = Column(String, default='upbit_binance')
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class SentimentSnapshot(Base):
+    """공포탐욕지수 스냅샷 — PANIC_DIP 패턴 판단용.
+
+    수집 주기: 4회/일 (00:30, 06:30, 12:30, 18:30 KST)
+    source: alternative.me FNG API (일 1회 업데이트, value 0~100)
+
+    Migration: create_all()로 자동 생성.
+    """
+    __tablename__ = 'sentiment_snapshots'
+    __table_args__ = (Index('idx_sentiment_ts', 'ts'),)
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    indicator_type = Column(String(32), default='FNG')   # 확장용 (현재 FNG만)
+    value = Column(Float)                                 # 0~100
+    label = Column(String(64))                            # Extreme Fear / Fear / Neutral / Greed / Extreme Greed
+
+    data_source = Column(String(64), default='alternative.me')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BtcWeeklySnapshot(Base):
+    """BTC 주봉 200MA 스냅샷 — G-14 ALT_MASSACRE 조건 평가용.
+
+    수집 주기: 매일 08:05 KST 1회 (주봉 데이터는 일 단위 변화만)
+    source: pyupbit get_ohlcv('KRW-BTC', interval='week', count=210)
+
+    Migration: create_all()로 자동 생성.
+    """
+    __tablename__ = 'btc_weekly_snapshots'
+    __table_args__ = (Index('idx_btc_weekly_ts', 'ts'),)
+    id = Column(Integer, primary_key=True, index=True)
+    ts = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    ma200 = Column(Float)                # 주봉 200MA (KRW)
+    current_price = Column(Float)        # 수집 시점 BTC 현재가 (주봉 마지막 close)
+    above_ma200 = Column(Boolean)        # current_price > ma200
+
+    data_source = Column(String(64), default='upbit_pyupbit')
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+

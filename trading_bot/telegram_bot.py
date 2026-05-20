@@ -160,6 +160,7 @@ def cmd_help() -> str:
         '/week      — 주간 성과 리포트 (regime · 규칙 · 트레이드)',
         '/positions — 보유 포지션 상세 (ROI · trailing · scale-out)',
         '/guardian  — 매크로 L1/L2 필터 상세',
+        '/health    — 데이터 수집 건강 체크 (나이·신선도)',
         '/signals   — 최근 6시간 신호 요약',
         '/balance   — KRW · 보유 종목 · 개별 ROI',
         '/report    — /week 별칭',
@@ -715,6 +716,86 @@ def cmd_guardian() -> str:
     return '\n'.join(lines)
 
 
+def cmd_health() -> str:
+    """데이터 수집 건강 체크 — 각 데이터의 나이와 상태 표시."""
+    from datetime import timezone as _tz, datetime as _dt
+    import html as _html
+
+    now_kst = _kst_now()
+    lines = [f'<b>🏥 데이터 건강</b>  <code>{now_kst.strftime("%m/%d %H:%M KST")}</code>', '']
+
+    def _age_h(ts) -> float:
+        if ts is None:
+            return float('inf')
+        try:
+            import pandas as pd
+            ts_pd = pd.Timestamp(ts)
+            if ts_pd.tzinfo is None:
+                ts_pd = ts_pd.tz_localize('UTC')
+            else:
+                ts_pd = ts_pd.tz_convert('UTC')
+            return (_dt.now(_tz.utc) - ts_pd.to_pydatetime()).total_seconds() / 3600
+        except Exception:
+            return float('inf')
+
+    def _status(age_h: float, warn_h: float, crit_h: float) -> str:
+        if age_h == float('inf'):
+            return '🚨 MISSING'
+        if age_h > crit_h:
+            return '🚨 MISSING'
+        if age_h > warn_h:
+            return '⚠️ STALE'
+        return '✅ FRESH'
+
+    try:
+        from trading_bot.collectors import macro as _mac
+        from trading_bot.collectors import dominance as _dom
+        from trading_bot.collectors import kimp as _kimp_col
+        from trading_bot.collectors import btc_weekly as _btcw
+        from trading_bot.collectors.sentiment import get_latest as _fng_latest
+
+        macro_row = _mac.get_latest()
+        dom_row   = _dom.get_latest()
+        kimp_row  = _kimp_col.get_latest()
+        btcw_row  = _btcw.get_latest()
+        fng_row   = _fng_latest()
+
+        # 매크로 (26h STALE_BUT_USABLE, 72h MISSING)
+        mac_age   = _age_h(macro_row.get('ts') if macro_row else None)
+        mac_status = _status(mac_age, 26, 72)
+        mac_zone   = macro_row.get('nasdaq_dxy_zone', '-') if macro_row else '-'
+        lines.append(f'매크로:     {mac_status} ({mac_age:.1f}h)  zone={_html.escape(mac_zone)}')
+
+        # 도미넌스 (3h STALE, 12h MISSING)
+        dom_age    = _age_h(dom_row.get('ts') if dom_row else None)
+        dom_status = _status(dom_age, 3, 12)
+        dom_stage  = dom_row.get('bull_stage', '-') if dom_row else '-'
+        lines.append(f'도미넌스:   {dom_status} ({dom_age:.1f}h)  stage={_html.escape(dom_stage)}')
+
+        # 김프 (12h STALE, 48h MISSING)
+        kmp_age    = _age_h(kimp_row.get('ts') if kimp_row else None)
+        kmp_status = _status(kmp_age, 12, 48)
+        kmp_pct    = f"{kimp_row.get('kimp_pct', 0):.2f}%" if kimp_row else '-'
+        lines.append(f'김프:       {kmp_status} ({kmp_age:.1f}h)  kimp={kmp_pct}')
+
+        # FNG (6h STALE, 24h MISSING)
+        fng_age    = _age_h(fng_row.get('ts') if fng_row else None)
+        fng_status = _status(fng_age, 6, 24)
+        fng_val    = f"{int(fng_row.get('value', 0))} {_html.escape(fng_row.get('label', ''))}" if fng_row else '-'
+        lines.append(f'FNG:        {fng_status} ({fng_age:.1f}h)  val={fng_val}')
+
+        # BTC 주봉 200MA (24h STALE, 48h MISSING)
+        btcw_age    = _age_h(btcw_row.get('ts') if btcw_row else None)
+        btcw_status = _status(btcw_age, 24, 48)
+        btcw_above  = ('above' if btcw_row.get('above_ma200') else 'below') if btcw_row else '-'
+        lines.append(f'BTC 200MA:  {btcw_status} ({btcw_age:.1f}h)  {btcw_above}')
+
+    except Exception as e:
+        lines.append(f'조회 실패: {_html.escape(str(e)[:100])}')
+
+    return '\n'.join(lines)
+
+
 def cmd_signals() -> str:
     """최근 6시간 신호 요약."""
     now = _kst_now()
@@ -1097,6 +1178,8 @@ def handle_message(text: str, chat_id: str, from_user_id: str) -> str:
         return cmd_positions()
     if cmd == '/guardian':
         return cmd_guardian()
+    if cmd == '/health':
+        return cmd_health()
     if cmd == '/signals':
         return cmd_signals()
     if cmd == '/balance':

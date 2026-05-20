@@ -30,15 +30,22 @@ _STALE_BUT_USABLE_HOURS   = 72   # STALE_BUT_USABLE 상한 (3일)
 _STALE_HOURS_WEEKDAY = _STALE_HOURS_FRESH
 _STALE_HOURS_WEEKEND = _STALE_BUT_USABLE_HOURS
 
+# 도미넌스 나이 임계값 (매시 수집 기준)
+_DOMINANCE_STALE_HOURS   = 3    # 경고 (DOMINANCE_STALE 플래그)
+_DOMINANCE_MISSING_HOURS = 12   # 차단 (DOMINANCE_DATA_MISSING)
+
+# BTC 주봉 200MA DB 캐시 최대 나이 (주봉 데이터는 48h 이내면 신뢰)
+_BTC_WEEKLY_MAX_AGE_H = 48
+
 
 def _is_weekend_kst() -> bool:
     """KST 기준 주말 여부 (토=5, 일=6)."""
     return datetime.now(_KST).weekday() >= 5
 
 
-def _macro_age_hours(macro: dict) -> float:
-    """macro['ts'] 기준 현재까지 경과 시간(h). 파싱 실패 시 inf 반환."""
-    ts = macro.get('ts')
+def _snapshot_age_hours(snapshot: dict) -> float:
+    """snapshot['ts'] 기준 현재까지 경과 시간(h). 파싱 실패 시 inf 반환."""
+    ts = snapshot.get('ts')
     if ts is None:
         return float('inf')
     try:
@@ -52,6 +59,10 @@ def _macro_age_hours(macro: dict) -> float:
         return (now_utc - ts_pd.to_pydatetime()).total_seconds() / 3600
     except Exception:
         return float('inf')
+
+
+# 하위 호환용 alias
+_macro_age_hours = _snapshot_age_hours
 
 
 def collect_all(run_macro: bool = True,
@@ -135,6 +146,15 @@ def get_market_context() -> dict:
     if dominance is None:
         block_reasons.append('DOMINANCE_DATA_MISSING')
         is_tradeable = False
+    else:
+        dom_age_h = _snapshot_age_hours(dominance)
+        if dom_age_h > _DOMINANCE_MISSING_HOURS:
+            block_reasons.append('DOMINANCE_DATA_MISSING')
+            is_tradeable = False
+            logger.warning('[GUARDIAN] dominance age=%.1fh > %dh — DOMINANCE_DATA_MISSING', dom_age_h, _DOMINANCE_MISSING_HOURS)
+        elif dom_age_h > _DOMINANCE_STALE_HOURS:
+            block_reasons.append('DOMINANCE_STALE')
+            logger.info('[GUARDIAN] dominance age=%.1fh > %dh — DOMINANCE_STALE (경고, 거래 유지)', dom_age_h, _DOMINANCE_STALE_HOURS)
 
     return {
         'macro':                macro,
@@ -159,13 +179,21 @@ def validate_freshness(context: dict) -> bool:
 def _check_btc_weekly_200() -> bool:
     """BTC 현재가가 주봉 200MA 위에 있으면 True (G-14, R-02 조건).
 
-    주봉 200MA = 200개 주봉 close 단순평균.
+    DB 최신값 우선 (나이 48h 이내). 초과 시 live pyupbit fallback.
     데이터 부족 시 False 반환 (보수적 처리).
     """
+    # 1. DB 최신값 조회
+    try:
+        from trading_bot.collectors import btc_weekly as _btc_w
+        row = _btc_w.get_latest()
+        if row and _snapshot_age_hours(row) <= _BTC_WEEKLY_MAX_AGE_H:
+            return bool(row.get('above_ma200', False))
+    except Exception as e:
+        logger.debug('BTC 주봉 DB 조회 실패, live fallback: %s', e)
+
+    # 2. live pyupbit fallback
     try:
         import pyupbit
-        import pandas as pd
-        import numpy as np
 
         df = pyupbit.get_ohlcv('KRW-BTC', interval='week', count=210)
         if df is None or len(df) < 200:

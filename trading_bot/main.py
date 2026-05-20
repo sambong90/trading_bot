@@ -273,6 +273,106 @@ def api_account_summary():
         return jsonify({'error':str(e)})
 
 
+@app.route('/api/health/data')
+def api_health_data():
+    """데이터 수집 건강 체크 — 각 소스의 최신 나이와 상태 반환."""
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        import pandas as _pd
+    except ImportError:
+        _pd = None
+
+    def _age_h(ts) -> float:
+        if ts is None:
+            return float('inf')
+        try:
+            ts_pd = _pd.Timestamp(ts)
+            if ts_pd.tzinfo is None:
+                ts_pd = ts_pd.tz_localize('UTC')
+            else:
+                ts_pd = ts_pd.tz_convert('UTC')
+            return (_dt.now(_tz.utc) - ts_pd.to_pydatetime()).total_seconds() / 3600
+        except Exception:
+            return float('inf')
+
+    def _status(age_h, warn_h, crit_h):
+        if age_h > crit_h:
+            return 'MISSING'
+        if age_h > warn_h:
+            return 'STALE'
+        return 'FRESH'
+
+    result = {}
+    try:
+        from trading_bot.collectors import macro as _mac
+        row = _mac.get_latest()
+        age = round(_age_h(row.get('ts') if row else None), 2)
+        result['macro'] = {
+            'age_h': age,
+            'status': _status(age, 26, 72),
+            'ts': str(row.get('ts', ''))[:19] if row else None,
+            'zone': row.get('nasdaq_dxy_zone') if row else None,
+        }
+    except Exception as e:
+        result['macro'] = {'error': str(e)}
+
+    try:
+        from trading_bot.collectors import dominance as _dom
+        row = _dom.get_latest()
+        age = round(_age_h(row.get('ts') if row else None), 2)
+        result['dominance'] = {
+            'age_h': age,
+            'status': _status(age, 3, 12),
+            'ts': str(row.get('ts', ''))[:19] if row else None,
+            'bull_stage': row.get('bull_stage') if row else None,
+        }
+    except Exception as e:
+        result['dominance'] = {'error': str(e)}
+
+    try:
+        from trading_bot.collectors import kimp as _kimp_col
+        row = _kimp_col.get_latest()
+        age = round(_age_h(row.get('ts') if row else None), 2)
+        result['kimp'] = {
+            'age_h': age,
+            'status': _status(age, 12, 48),
+            'ts': str(row.get('ts', ''))[:19] if row else None,
+            'kimp_pct': row.get('kimp_pct') if row else None,
+        }
+    except Exception as e:
+        result['kimp'] = {'error': str(e)}
+
+    try:
+        from trading_bot.collectors.sentiment import get_latest as _fng_latest
+        row = _fng_latest()
+        age = round(_age_h(row.get('ts') if row else None), 2)
+        result['fng'] = {
+            'age_h': age,
+            'status': _status(age, 6, 24),
+            'ts': str(row.get('ts', ''))[:19] if row else None,
+            'value': row.get('value') if row else None,
+            'label': row.get('label') if row else None,
+        }
+    except Exception as e:
+        result['fng'] = {'error': str(e)}
+
+    try:
+        from trading_bot.collectors import btc_weekly as _btcw
+        row = _btcw.get_latest()
+        age = round(_age_h(row.get('ts') if row else None), 2)
+        result['btc_weekly_ma200'] = {
+            'age_h': age,
+            'status': _status(age, 24, 48),
+            'ts': str(row.get('ts', ''))[:19] if row else None,
+            'ma200': row.get('ma200') if row else None,
+            'above_ma200': row.get('above_ma200') if row else None,
+        }
+    except Exception as e:
+        result['btc_weekly_ma200'] = {'error': str(e)}
+
+    return jsonify(result)
+
+
 @app.route('/api/decision_detail')
 def api_decision_detail():
     """선택된 결정의 상세 정보 및 OHLCV 데이터 반환"""

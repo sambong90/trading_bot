@@ -255,3 +255,46 @@ macro 데이터 나이 기준:
 7. **_max_strength에 sell 패턴 포함**: ABANDONMENT/DRAGON_BEAR의 strength가 buy conviction 판단에 혼입 → buy 신호만 집계하도록 수정 (2026-05-19)
 8. **PositionState.avg_buy_price 항상 0**: `update_trailing_high()`가 새 레코드를 avg=0으로 생성 + 이후 `set_scale_out_stage()` 미호출 → 매수 직후 `set_scale_out_stage(ticker, 0, fill_price)` 추가. 근거: HYPER/NEAR 모두 avg=0으로 count_open_positions=0, analytics 오표시 (2026-05-20)
 9. **HARD/TRAIL STOP 매도 ai_events 누락**: `analyze_ticker()` HARD STOP, TRAIL STOP 경로 및 Pass 0 `check_hard_stop_loss()` 이후 `log_ai_event()` + `log_execution_event()` 미호출 → 3개 경로에 STOP_LOSS/SCALE_OUT 이벤트 기록 추가. 누락 시 `sync_manual_trades()`가 MANUAL_SELL로 오분류 (2026-05-20)
+
+## 데이터 수집 체계 최적화 (2026-05-20)
+
+### 현행 스케줄 (최적화 후)
+
+| 시각 (KST) | 작업 | 주기 |
+|------------|------|------|
+| HH:00 (0,6,12,18) | 김프 수집 | 4회/일 |
+| HH:00 (22,23,0,1,2,3,4,5,6,7,13,19) | 매크로 수집 | 12회/일 |
+| HH:01 | 매매 사이클 (auto_trader) | 24회/일 |
+| HH:02 | BTC 도미넌스 수집 | 24회/일 |
+| HH:30 (0,6,12,18) | FNG 수집 | 4회/일 |
+| 08:05 | BTC 주봉 200MA | 1회/일 |
+| 03:00 | DB 하우스키핑 | 1회/일 |
+| 04:00 (일요일) | Walk-Forward 튜닝 | 1회/주 |
+| 09:01 | 일일 브리핑 | 1회/일 |
+| 5분 간격 | Heartbeat | 288회/일 |
+
+### 신규 파일
+- `collectors/sentiment.py` — FNG 스케줄 수집기 (3회 재시도, DB 저장)
+- `collectors/btc_weekly.py` — BTC 주봉 200MA 수집기 (DB 저장)
+
+### 신규 DB 테이블 (create_all() 자동 생성)
+- `sentiment_snapshots` — FNG 스냅샷 (value, label, indicator_type)
+- `btc_weekly_snapshots` — BTC 주봉 200MA (ma200, current_price, above_ma200)
+
+### 주요 변경 사항
+- **매크로**: 1회/일 → 12회/일 (미장 매시 + 평시 3회). None 반환 시 텔레그램 알림 + 30분 후 1회 자동 재시도.
+- **도미넌스**: 6회/일(4h) → 24회/일(매시). 나이 3h 초과 시 DOMINANCE_STALE, 12h 초과 시 DOMINANCE_DATA_MISSING (aggregator.py).
+- **김프**: 24회/일 → 4회/일 (Guardian 미소비, ExchangeRate-API 할당량 절약).
+- **FNG**: 스케줄 없음(매 사이클 live) → 4회/일 스케줄 수집 + DB 저장. `sentiment.py`가 DB 우선 조회(6h 이내), 초과 시 live fallback.
+- **BTC 주봉 200MA**: 매 사이클 pyupbit live → 1회/일 DB 캐싱. aggregator가 DB 조회(48h 이내), 초과 시 live fallback.
+- **도미넌스 연속 실패 알림**: 3회 연속 실패 시 텔레그램 알림.
+- `/health` Telegram 명령 추가 — 5개 데이터 소스 나이·상태 표시.
+- `/api/health/data` Flask 엔드포인트 추가 (JSON).
+
+### Stale 임계값 요약 (aggregator.py 기준)
+| 데이터 | STALE 경고 | MISSING 차단 |
+|--------|-----------|-------------|
+| macro | 26h (STALE_BUT_USABLE) | 72h |
+| dominance | 3h | 12h |
+| FNG | DB 조회 6h 초과 → live fallback (차단 없음) | — |
+| BTC 200MA | DB 조회 48h 초과 → live fallback (차단 없음) | — |
