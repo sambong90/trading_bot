@@ -78,3 +78,10 @@ DYN_THR_BY_REGIME: dict = {
 # 전체 오버라이드: 긴급/디버깅 용도. 설정 시 장세별 매핑 무시.
 _dyn_thr_override_raw = os.environ.get('DYN_THR_OVERRIDE', '')
 DYN_THR_OVERRIDE: float | None = float(_dyn_thr_override_raw) if _dyn_thr_override_raw else None
+
+# G-11: BUBBLE 연속 발동 임계값 / 매수 축소 배수
+G11_BUBBLE_STREAK_MIN   = int(os.environ.get('G11_BUBBLE_STREAK_MIN',   '3'))
+G11_BUBBLE_BUY_SIZE_MULT = float(os.environ.get('G11_BUBBLE_BUY_SIZE_MULT', '0.5'))
+
+# G-15: BEAR_DIVERGENCE 판단 lookback 포인트 수 (MacroSnapshot 개수, 12회/일 기준 60 = 약 5일)
+G15_DIVERGENCE_LOOKBACK = int(os.environ.get('G15_DIVERGENCE_LOOKBACK', '60'))

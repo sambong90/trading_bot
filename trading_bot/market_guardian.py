@@ -165,6 +165,23 @@ class MarketGuardian:
             flags.append('G-14:ALT_MASSACRE_ZONE')
             logger.info('[L1-B] G-14 발동 — BTC.D=%.1f%% 주봉200붕괴 → ALT 매수 전면 차단', btc_dom)
 
+        # G-11: BUBBLE 연속 3회+ → 거품 경고 / 추가 매수 자제 (P3)
+        from trading_bot.config import G11_BUBBLE_STREAK_MIN, G11_BUBBLE_BUY_SIZE_MULT
+        bubble_streak = self._bubble_streak()
+        if bubble_streak >= G11_BUBBLE_STREAK_MIN:
+            buy_size_multiplier = min(buy_size_multiplier, G11_BUBBLE_BUY_SIZE_MULT)
+            flags.append(f'G-11:BUBBLE_STREAK_{bubble_streak}')
+            logger.info(
+                '[L1-B] G-11 발동 — BUBBLE streak=%d → buy_size_mult=%.1f',
+                bubble_streak, G11_BUBBLE_BUY_SIZE_MULT,
+            )
+
+        # G-15: DXY 저점 상승 + NASDAQ 고점 하락 → BEAR_DIVERGENCE / 신규 매수 차단 (P3)
+        if self._check_g15_bear_divergence():
+            allow_new_entry = False
+            flags.append('G-15:BEAR_DIVERGENCE')
+            logger.warning('[L1-B] G-15 발동 — DXY 저점상승+NDX 고점하락 → 신규 매수 차단')
+
         # ════════════════════════════════════════════════════════════════════
         # L2  장세 분류 — DominanceSnapshot.bull_stage + BTC EMA 추세 결합
         # ════════════════════════════════════════════════════════════════════
@@ -323,6 +340,105 @@ class MarketGuardian:
             else:
                 break  # 연속 끊김
         return streak
+
+    # ── G-11 BUBBLE 연속 카운트 ──────────────────────────────────────────────
+
+    def _bubble_streak(self) -> int:
+        """최근 5개 MacroSnapshot에서 BUBBLE 연속 개수를 계산해 반환 (G-11).
+
+        SystemState('bubble_streak')에 캐시 → 이번 사이클은 DB 읽기 1회.
+        """
+        try:
+            streak = self._compute_bubble_streak()
+            try:
+                from trading_bot.risk import set_system_state
+                set_system_state('bubble_streak', str(streak))
+            except Exception:
+                pass
+            return streak
+        except Exception as e:
+            logger.debug('[Guardian] BUBBLE streak 계산 실패: %s', e)
+            try:
+                from trading_bot.risk import get_system_state
+                return int(get_system_state('bubble_streak', '0') or 0)
+            except Exception:
+                return 0
+
+    def _compute_bubble_streak(self) -> int:
+        from trading_bot.db import get_session
+        from trading_bot.models import MacroSnapshot
+
+        session = get_session()
+        try:
+            rows = (
+                session.query(MacroSnapshot)
+                .order_by(MacroSnapshot.ts.desc())
+                .limit(5)
+                .all()
+            )
+        finally:
+            session.close()
+
+        if not rows:
+            return 0
+
+        streak = 0
+        for row in rows:  # 최신순 — BUBBLE 연속 체크
+            cond = _market_condition(
+                dxy_change_pct=row.dxy_1d_pct or 0.0,
+                asset_change_pct=row.nasdaq_1d_pct or 0.0,
+            )
+            if cond == 'BUBBLE':
+                streak += 1
+            else:
+                break
+        return streak
+
+    # ── G-15 BEAR_DIVERGENCE 감지 ────────────────────────────────────────────
+
+    def _check_g15_bear_divergence(self) -> bool:
+        """G-15: DXY 저점 상승(higher lows) + NASDAQ 고점 하락(lower highs) 동시 감지.
+
+        최근 G15_DIVERGENCE_LOOKBACK 개 MacroSnapshot을 전반/후반으로 분할:
+          후반 DXY min > 전반 DXY min  AND  후반 NASDAQ max < 전반 NASDAQ max → True.
+        데이터 부족(lookback 미달) 시 False (필터 비적용 원칙).
+        """
+        try:
+            from trading_bot.config import G15_DIVERGENCE_LOOKBACK
+            from trading_bot.db import get_session
+            from trading_bot.models import MacroSnapshot
+
+            session = get_session()
+            try:
+                rows = (
+                    session.query(MacroSnapshot.dxy_value, MacroSnapshot.nasdaq_value)
+                    .filter(MacroSnapshot.dxy_value.isnot(None))
+                    .filter(MacroSnapshot.nasdaq_value.isnot(None))
+                    .order_by(MacroSnapshot.ts.desc())
+                    .limit(G15_DIVERGENCE_LOOKBACK)
+                    .all()
+                )
+            finally:
+                session.close()
+
+            if len(rows) < G15_DIVERGENCE_LOOKBACK:
+                return False
+
+            rows = list(reversed(rows))  # oldest → newest
+            half = len(rows) // 2
+
+            dxy_prev   = [float(r[0]) for r in rows[:half]]
+            dxy_recent = [float(r[0]) for r in rows[half:]]
+            ndx_prev   = [float(r[1]) for r in rows[:half]]
+            ndx_recent = [float(r[1]) for r in rows[half:]]
+
+            dxy_higher_lows = min(dxy_recent) > min(dxy_prev)
+            ndx_lower_highs = max(ndx_recent) < max(ndx_prev)
+
+            return dxy_higher_lows and ndx_lower_highs
+        except Exception as e:
+            logger.debug('[Guardian] G-15 divergence 체크 실패(필터 비적용): %s', e)
+            return False
 
 
 # ── 모듈 수준 헬퍼 ───────────────────────────────────────────────────────────
