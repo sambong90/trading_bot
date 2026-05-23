@@ -1174,8 +1174,19 @@ def run_cycle(mode):
         if cb_triggered:
             circuit_breaker_active = True
             logger.info('🚨 [CIRCUIT BREAKER] %s (일간DD=%.1f%%, 전체DD=%.1f%%)', cb_reason, daily_dd, total_dd)
-            ai_logger.info('[CIRCUIT_BREAKER] %s | daily_dd=%.1f%% | total_dd=%.1f%%', cb_reason, daily_dd, total_dd)
-            _notify(f'🚨 Circuit Breaker 발동!\n{cb_reason}\n일간DD: {daily_dd:.1f}%\n전체DD: {total_dd:.1f}%', level='CRITICAL')
+            from trading_bot.ai_logger import log_ai_event as _log_cb_event
+            _log_cb_event(
+                'ERROR', ticker='ACCOUNT', signal='sell',
+                decision_reason=f'CB_TRIGGERED: {cb_reason}',
+                extra={
+                    'daily_dd_pct': round(daily_dd, 2),
+                    'total_dd_pct': round(total_dd, 2),
+                    'current_equity': round(current_equity, 0),
+                    'daily_start_equity': round(daily_start_equity, 0),
+                    'peak_equity': round(peak_equity, 0),
+                },
+            )
+            _notify(f'🚨 Circuit Breaker 발동!\n{cb_reason}\n일간DD: {daily_dd:.1f}%\n전체DD: {total_dd:.1f}%\n현재평가: {current_equity:,.0f}원', level='CRITICAL')
 
             # 보유 포지션 50% 강제 축소
             import pyupbit

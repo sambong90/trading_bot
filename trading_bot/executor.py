@@ -802,14 +802,25 @@ class LiveExecutor:
             net -= float(additional_spend or 0)
 
             # add unrealized P&L: 보유 자산 현재가 일괄 조회 (배치 API 1회)
+            # unreal을 try 외부에서 초기화 — pyupbit 예외 발생 시에도 net에 반드시 합산
+            unreal = 0.0
             try:
-                import pyupbit
+                import pyupbit, json as _json
+                # known_delisted_tickers 제외: 상장폐지 코인이 배치 조회를 실패시켜
+                # unreal이 net에 합산되지 않는 CB 오발동 방지
+                try:
+                    from trading_bot.risk import get_system_state as _gss
+                    _known_dl = set(_json.loads(_gss('known_delisted_tickers', '[]') or '[]'))
+                except Exception:
+                    _known_dl = set()
                 balances = self.client.get_balances() if hasattr(self, 'client') and self.client else []
                 unreal = float(next(
                     (float(b.get('balance') or 0) for b in balances if b.get('currency') == 'KRW'), 0.0
                 ))
                 non_krw = [(b, f'KRW-{b["currency"]}') for b in balances
-                           if b.get('currency') != 'KRW' and float(b.get('balance') or 0) > 0]
+                           if b.get('currency') != 'KRW'
+                           and float(b.get('balance') or 0) > 0
+                           and f'KRW-{b["currency"]}' not in _known_dl]
                 if non_krw:
                     markets = [m for _, m in non_krw]
                     prices_raw = pyupbit.get_current_price(markets)
@@ -823,11 +834,42 @@ class LiveExecutor:
                         p = prices.get(market)
                         if p:
                             unreal += float(b.get('balance', 0)) * float(p)
-                net += unreal
             except Exception:
                 pass
-            # if net loss beyond threshold, return True
-            return net < -float(getattr(self, 'MAX_DAILY_LOSS_KRW', 50000))
+            net += unreal  # try 외부: 예외 여부와 무관하게 항상 합산
+
+            exceeded = net < -float(getattr(self, 'MAX_DAILY_LOSS_KRW', 50000))
+            if exceeded:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    '[DAILY_CB] 일간 손실 한도 초과: net=%.0f unreal=%.0f pnl=%.0f spend=%.0f limit=%.0f',
+                    net, unreal, pnl, additional_spend, getattr(self, 'MAX_DAILY_LOSS_KRW', 50000),
+                )
+                try:
+                    from trading_bot.ai_logger import log_ai_event as _lai
+                    _lai(
+                        'ERROR', ticker='ACCOUNT', signal='buy',
+                        decision_reason='Daily loss limit exceeded, blocking new buys',
+                        extra={
+                            'net': round(net, 0),
+                            'unreal': round(unreal, 0),
+                            'pnl_today': round(pnl, 0),
+                            'add_spend': round(float(additional_spend or 0), 0),
+                            'limit_krw': getattr(self, 'MAX_DAILY_LOSS_KRW', 50000),
+                        },
+                    )
+                except Exception:
+                    pass
+                try:
+                    self._notify_telegram(
+                        f'[DAILY_CB] 일간 손실 한도 초과\n'
+                        f'순손익(오늘): {pnl:,.0f}원\n'
+                        f'현재 평가액: {unreal:,.0f}원\n'
+                        f'한도: -{getattr(self, "MAX_DAILY_LOSS_KRW", 50000):,.0f}원'
+                    )
+                except Exception:
+                    pass
+            return exceeded
         except Exception:
             return False
 
