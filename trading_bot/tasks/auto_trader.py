@@ -72,6 +72,12 @@ DEFAULT_COUNT = 200
 _pending_buy_costs: dict = {}
 # 상장폐지 확인된 티커 캐시 — 최초 감지 시 저장, 이후 API 호출 스킵
 _delisted_tickers: set = set()
+try:
+    import json as _json_dl
+    from trading_bot.risk import get_system_state as _gss_dl
+    _delisted_tickers = set(_json_dl.loads(_gss_dl('known_delisted_tickers', '[]') or '[]'))
+except Exception:
+    pass
 _UPBIT_CODE_NOT_FOUND = 'Code not found'
 ACCOUNT_VALUE = float(os.environ.get('ACCOUNT_VALUE', '100000'))
 # 업비트 최소 주문 금액(원). 이 금액 미만 보유 시 매도 신호 무시(무의미한 반복 로깅 방지)
