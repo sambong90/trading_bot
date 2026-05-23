@@ -258,10 +258,8 @@ class LiveExecutor:
     def _load_env_flags(self):
         import os
         self.ENABLE_AUTO_LIVE = os.environ.get('ENABLE_AUTO_LIVE') == '1'
-        try:
-            self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', '50000'))
-        except Exception:
-            self.MAX_DAILY_LOSS_KRW = 50000.0
+        from trading_bot.config import MAX_DAILY_LOSS_KRW as _cfg_limit
+        self.MAX_DAILY_LOSS_KRW = _cfg_limit
         try:
             self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', '0.1'))
         except Exception:
@@ -746,7 +744,8 @@ class LiveExecutor:
                 env_enable = db_val  # DB 값이 환경 변수보다 우선 (pod 재시작 후 유지)
 
             self.ENABLE_AUTO_LIVE = env_enable == '1'
-            self.MAX_DAILY_LOSS_KRW = float(os.environ.get('MAX_DAILY_LOSS_KRW', self.MAX_DAILY_LOSS_KRW))
+            from trading_bot.config import MAX_DAILY_LOSS_KRW as _cfg_limit
+            self.MAX_DAILY_LOSS_KRW = _cfg_limit
             self.MAX_POSITION_PCT = float(os.environ.get('MAX_POSITION_PCT', self.MAX_POSITION_PCT))
             self.TELEGRAM_ALERTS = os.environ.get('TELEGRAM_ALERTS', 'false').lower() in ('1', 'true', 'yes')
         except Exception:
@@ -842,8 +841,8 @@ class LiveExecutor:
             if exceeded:
                 import logging as _logging
                 _logging.getLogger(__name__).warning(
-                    '[DAILY_CB] 일간 손실 한도 초과: net=%.0f unreal=%.0f pnl=%.0f spend=%.0f limit=%.0f',
-                    net, unreal, pnl, additional_spend, getattr(self, 'MAX_DAILY_LOSS_KRW', 50000),
+                    '[DAILY_CB] 일간 손실 한도 초과: realized=%.0f unreal=%.0f additional=%.0f net=%.0f limit=%.0f',
+                    pnl, unreal, float(additional_spend or 0), net, getattr(self, 'MAX_DAILY_LOSS_KRW', 50000),
                 )
                 try:
                     from trading_bot.ai_logger import log_ai_event as _lai

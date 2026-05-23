@@ -49,6 +49,10 @@ MACRO_EMA_LONG = int(os.getenv('MACRO_EMA_LONG', 50))
 DD_DAILY_LIMIT_PCT = float(os.environ.get('DD_DAILY_LIMIT_PCT', '5.0'))
 DD_TOTAL_LIMIT_PCT = float(os.environ.get('DD_TOTAL_LIMIT_PCT', '15.0'))
 
+# 일간 손실 한도 절대값 (KRW). 0이면 ACCOUNT_VALUE * DD_DAILY_LIMIT_PCT / 100으로 자동 산출.
+_max_daily_raw = float(os.environ.get('MAX_DAILY_LOSS_KRW', '0'))
+MAX_DAILY_LOSS_KRW = _max_daily_raw if _max_daily_raw > 0 else float(os.environ.get('ACCOUNT_VALUE', '100000')) * DD_DAILY_LIMIT_PCT / 100
+
 # Breakeven Stop: 이 ROI(%) 도달 후 트레일링 스탑 하한을 avg_buy로 고정
 BREAKEVEN_ROI_PCT = float(os.environ.get('BREAKEVEN_ROI_PCT', '3.0'))
 
