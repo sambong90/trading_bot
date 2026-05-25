@@ -1,5 +1,33 @@
 # CHANGELOG.md
 
+## 실시간 이상 감지 Watchdog (2026-05-24)
+
+trading_bot/watchdog.py 신규. APScheduler 5분 간격 등록. 완전 읽기 전용.
+
+시스템 이상:
+- 스케줄러 heartbeat 10분 이상 미갱신 → 🚨 알림
+- 매매 사이클 HH:01 기준 5분 이상 지연 → ⚠️ 알림 (ENABLE_AUTO_TRADING=1일 때만)
+- DB 연결 실패 (SELECT 1) → 🚨 알림
+- Upbit API 3회 연속 실패 (모듈 내 카운터) → 🚨 알림
+
+매매 이상:
+- 동일 종목 1시간 내 매수+매도 (ai_events EXECUTE) → ⚠️ 왕복 매매 알림
+- Order.raw.signal_price vs fill_price 2% 초과 → ⚠️ 슬리피지 알림
+- 일간 DD가 DD_DAILY_LIMIT_PCT×80% 도달 (system_state) → ⚠️ CB 사전 경고
+- BULL_EARLY 이상 장세 24h 매수 체결 0건 → ℹ️ 무거래 알림
+
+데이터 이상:
+- kimp_snapshots 최신 레코드 12h 초과 → ⚠️ 알림
+- sentiment_snapshots 6h 초과 + live fallback 실패 → ⚠️ FNG 알림
+
+중복 방지: 동일 이상 1h 쿨다운 (메모리, pod 재시작 시 초기화).
+TELEGRAM_ALERT_LEVEL 연동: CRITICAL=🚨만, TRADE=🚨+⚠️, SUMMARY=전부, OFF=없음.
+
+변경 파일:
+- trading_bot/watchdog.py: 신규 (이상 감지 10개 체크)
+- trading_bot/tasks/auto_trader.py: run_cycle() 종료 시 system_state last_cycle_completed 기록
+- trading_bot/tasks/scheduler_service.py: watchdog job 등록 (5분 간격, misfire_grace_time=60)
+
 ## Guardian L1 필터 보강 (2026-05-21)
 
 GAP_ANALYSIS.md 기반 G-11/G-15 구현. 나머지(G-07 reserve_currency, G-12 패턴 완전 구현)는 데이터 구조상 불가 판정.

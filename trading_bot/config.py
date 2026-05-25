@@ -89,3 +89,7 @@ G11_BUBBLE_BUY_SIZE_MULT = float(os.environ.get('G11_BUBBLE_BUY_SIZE_MULT', '0.5
 
 # G-15: BEAR_DIVERGENCE 판단 lookback 포인트 수 (MacroSnapshot 개수, 12회/일 기준 60 = 약 5일)
 G15_DIVERGENCE_LOOKBACK = int(os.environ.get('G15_DIVERGENCE_LOOKBACK', '60'))
+# G-15: NDX 고점 하락 최소 임계값(%) — 노이즈성 틱 오발동 방지 (0.5% 미만 무시)
+G15_NDX_MIN_DROP_PCT = float(os.environ.get('G15_NDX_MIN_DROP_PCT', '0.5'))
+# G-15: DXY 저점 상승 최소 임계값(%) — 노이즈성 틱 오발동 방지 (0.3% 미만 무시)
+G15_DXY_MIN_RISE_PCT = float(os.environ.get('G15_DXY_MIN_RISE_PCT', '0.3'))

@@ -404,16 +404,25 @@ class MarketGuardian:
         데이터 부족(lookback 미달) 시 False (필터 비적용 원칙).
         """
         try:
-            from trading_bot.config import G15_DIVERGENCE_LOOKBACK
+            from trading_bot.config import (
+                G15_DIVERGENCE_LOOKBACK,
+                G15_NDX_MIN_DROP_PCT,
+                G15_DXY_MIN_RISE_PCT,
+            )
             from trading_bot.db import get_session
             from trading_bot.models import MacroSnapshot
 
             session = get_session()
             try:
                 rows = (
-                    session.query(MacroSnapshot.dxy_value, MacroSnapshot.nasdaq_value)
+                    session.query(
+                        MacroSnapshot.dxy_value,
+                        MacroSnapshot.nasdaq_value,
+                        MacroSnapshot.ratio_quality,
+                    )
                     .filter(MacroSnapshot.dxy_value.isnot(None))
                     .filter(MacroSnapshot.nasdaq_value.isnot(None))
+                    .filter(MacroSnapshot.ratio_quality != 'stale')
                     .order_by(MacroSnapshot.ts.desc())
                     .limit(G15_DIVERGENCE_LOOKBACK)
                     .all()
@@ -432,8 +441,8 @@ class MarketGuardian:
             ndx_prev   = [float(r[1]) for r in rows[:half]]
             ndx_recent = [float(r[1]) for r in rows[half:]]
 
-            dxy_higher_lows = min(dxy_recent) > min(dxy_prev)
-            ndx_lower_highs = max(ndx_recent) < max(ndx_prev)
+            dxy_higher_lows = min(dxy_recent) > min(dxy_prev) * (1 + G15_DXY_MIN_RISE_PCT / 100)
+            ndx_lower_highs = max(ndx_recent) < max(ndx_prev) * (1 - G15_NDX_MIN_DROP_PCT / 100)
 
             return dxy_higher_lows and ndx_lower_highs
         except Exception as e:
