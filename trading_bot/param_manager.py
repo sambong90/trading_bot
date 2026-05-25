@@ -43,14 +43,24 @@ def get_best_params() -> dict:
     except Exception:
         defaults = _DEFAULT_PARAMS.copy()
 
+    import logging as _logging
+    _pm_log = _logging.getLogger(__name__)
+
     session = get_session()
     try:
-        record = session.query(TuningRun).order_by(TuningRun.created_at.desc()).limit(1).first()
-        if not record or not isinstance(record.combo, dict):
-            result = defaults
-        else:
+        records = session.query(TuningRun).order_by(TuningRun.created_at.desc()).limit(10).all()
+        result = None
+        for r in records:
+            if not r or not isinstance(r.combo, dict):
+                continue
+            oos = float((r.metrics or {}).get('oos_score') or 0.0)
+            if oos > 0.0:
+                result = defaults.copy()
+                result.update(r.combo)
+                break
+            _pm_log.info('TuningRun #%s OOS=%.4f 미달, 이전 파라미터 유지', r.id, oos)
+        if result is None:
             result = defaults.copy()
-            result.update(record.combo)
     except Exception:
         result = defaults.copy()
     finally:

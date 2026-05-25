@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-05-25 — auto_tuner OOS 검증력 강화
+
+### 목적
+OOS=0.0 파라미터가 실전에 무조건 적용되던 문제 수정.
+OOS 기간 9일(30일 데이터)에서 EMA 15/30 크로스 신호가 발생하지 않아 검증 불가했던 구조 개선.
+
+### 변경 파일
+- tasks/auto_tuner.py: COUNT_30D_1H(720) → COUNT_60D_1H(1440). OOS 기간 9일 → 18일.
+  튜닝 완료 후 텔레그램 알림 (IS/OOS score, 파라미터, 적용 여부).
+- param_manager.py: OOS score gate 추가.
+  최신 TuningRun의 oos_score <= 0 이면 스킵, 이전 레코드 중 oos_score > 0인 것 사용.
+  모든 레코드 미달이면 config.py 기본값 fallback.
+
+---
+
 ## 2026-05-25 — 시장 캘린더 데이터 구축
 
 ### 목적

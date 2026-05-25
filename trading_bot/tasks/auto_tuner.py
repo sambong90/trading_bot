@@ -38,7 +38,7 @@ from trading_bot.backtest import simple_backtest
 from trading_bot.db import get_session
 from trading_bot.models import TuningRun
 
-COUNT_30D_1H = 30 * 24   # 720 bars (1h 전략 평가용)
+COUNT_60D_1H = 60 * 24   # 1440 bars (1h 전략 평가용 — OOS 18일 확보)
 COUNT_DAY = 200           # 일봉 200개 (macro_ema_long=100 기준 충분한 워밍업)
 TICKERS = ['KRW-BTC', 'KRW-SOL']
 
@@ -230,8 +230,8 @@ def main():
 
     all_results = []
     for ticker in TICKERS:
-        print(f'[auto_tuner] Fetching {COUNT_30D_1H} bars 1h for {ticker}...')
-        df = fetch_ohlcv(ticker=ticker, interval='minute60', count=COUNT_30D_1H, use_db_first=True)
+        print(f'[auto_tuner] Fetching {COUNT_60D_1H} bars 1h for {ticker}...')
+        df = fetch_ohlcv(ticker=ticker, interval='minute60', count=COUNT_60D_1H, use_db_first=True)
         if df is None or len(df) < 100:
             print(f'[auto_tuner] Skip {ticker}: insufficient data')
             continue
@@ -332,6 +332,25 @@ def main():
         invalidate_cache()
     except Exception:
         pass
+
+    # ── 튜닝 결과 텔레그램 알림 ─────────────────────────────────────────────
+    try:
+        from trading_bot.monitor import send_telegram
+        _c = best['combo']
+        _is = best['is_score']
+        _oos = best['oos_score']
+        _applied = _oos > 0.0
+        _apply_str = '반영' if _applied else 'OOS 미달 — 이전 유지'
+        _msg = (
+            f'Auto-Tuner 완료\n'
+            f'IS: {_is:.4f} / OOS: {_oos:.4f}\n'
+            f'파라미터: EMA {_c.get("ema_short")}/{_c.get("ema_long")}, '
+            f'ADX {_c.get("adx_trend_threshold")}, macro_ema {_c.get("macro_ema_long")}\n'
+            f'적용: {_apply_str}'
+        )
+        send_telegram(_msg)
+    except Exception as e:
+        print(f'[auto_tuner] 텔레그램 알림 실패: {e}')
 
     # ── AI Reviewer 순차 실행: 튜닝 완료 직후 브리핑 생성 ──────────────────
     # 독립 cron 대신 여기서 직접 호출하여 레이스 컨디션 완전 제거.
