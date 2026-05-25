@@ -106,13 +106,17 @@ def _classify_crisis_level(dxy_1d_pct: float, gold_1d_pct: float, nasdaq_1d_pct:
     return 'NORMAL'
 
 
-def _is_market_stale(ts: datetime) -> bool:
-    """주말/미국 공휴일 여부 — 단순 요일 판정 (토=5, 일=6).
-
-    실제 공휴일 캘린더는 추후 pandas_market_calendars로 교체 가능.
-    """
-    weekday = ts.weekday()
-    return weekday >= 5  # 토요일(5), 일요일(6)
+def _ratio_quality(ts: datetime) -> str:
+    """ratio_quality 결정: fresh(개장일) / holiday(평일 공휴일) / stale(주말)."""
+    try:
+        from trading_bot.market_calendar import is_us_market_open, is_us_holiday
+        if is_us_market_open(ts):
+            return 'fresh'
+        if is_us_holiday(ts):
+            return 'holiday'
+        return 'stale'
+    except Exception:
+        return 'stale' if ts.weekday() >= 5 else 'fresh'
 
 
 def _pct_change(prev: float, curr: float) -> float:
@@ -205,7 +209,7 @@ def collect(session=None) -> dict | None:
     oil_vol_flag = abs(oil_1d_pct) >= _OIL_VOL_PCT if oil else False
 
     now_utc      = datetime.now(timezone.utc)
-    ratio_quality = 'stale' if _is_market_stale(now_utc) else 'fresh'
+    ratio_quality = _ratio_quality(now_utc)
 
     snapshot_data = {
         'ts':               now_utc,
@@ -234,6 +238,13 @@ def collect(session=None) -> dict | None:
     }
 
     _save(snapshot_data, session)
+    if ratio_quality == 'holiday':
+        try:
+            from trading_bot.market_calendar import get_holiday_name
+            hname = get_holiday_name(now_utc) or 'US Holiday'
+            logger.info('US market closed (%s) — ratio_quality=holiday', hname)
+        except Exception:
+            pass
     logger.info(
         'MacroSnapshot 저장 — ratio=%.1f zone=%s quality=%s crisis=%s',
         nasdaq_dxy_ratio, nasdaq_dxy_zone, ratio_quality, crisis_level,

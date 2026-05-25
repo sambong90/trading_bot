@@ -422,7 +422,7 @@ class MarketGuardian:
                     )
                     .filter(MacroSnapshot.dxy_value.isnot(None))
                     .filter(MacroSnapshot.nasdaq_value.isnot(None))
-                    .filter(MacroSnapshot.ratio_quality != 'stale')
+                    .filter(MacroSnapshot.ratio_quality == 'fresh')
                     .order_by(MacroSnapshot.ts.desc())
                     .limit(G15_DIVERGENCE_LOOKBACK)
                     .all()

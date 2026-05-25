@@ -307,6 +307,18 @@ def collect_macro(is_retry: bool = False) -> None:
     """
     global _macro_consec_failures
     label = ' (재시도)' if is_retry else ''
+
+    # 미장 공휴일: 07:00/19:00 KST 외 수집 생략 (동일값 반복 저장 방지)
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        from trading_bot.market_calendar import is_us_holiday as _is_holiday
+        _now_kst = datetime.now(_ZI('Asia/Seoul'))
+        if _is_holiday(_now_kst) and _now_kst.hour not in (7, 19):
+            _log('[수집] 미장 공휴일 — collect_macro 생략 (허용: 07:00/19:00 KST)')
+            return
+    except Exception:
+        pass
+
     _log(f'[수집] collect_macro 실행{label}')
     try:
         from trading_bot.collectors import macro as _macro
@@ -644,6 +656,17 @@ _log('일일 브리핑 스케줄 등록 (매일 09:01 KST)')
 # Heartbeat: 5분마다 (외부 모니터링용)
 sched.add_job(_write_heartbeat, 'interval', minutes=5, id='heartbeat')
 _log('Heartbeat 스케줄 등록 (5분마다)')
+
+# Watchdog: 5분마다 이상 감지 알림
+def _run_watchdog() -> None:
+    try:
+        from trading_bot.watchdog import run_watchdog
+        run_watchdog()
+    except Exception as e:
+        _log(f'[watchdog] 실행 실패: {e}', 'error')
+
+sched.add_job(_run_watchdog, 'interval', minutes=5, id='watchdog', misfire_grace_time=60)
+_log('Watchdog 스케줄 등록 (5분마다)')
 
 # NOTE: auto_summary job disabled per user request to stop periodic fetch-complete Telegram messages.
 # sched.add_job(run_summary, 'interval', minutes=5, id='auto_summary')

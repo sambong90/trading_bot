@@ -688,6 +688,16 @@ def cmd_guardian() -> str:
 
         # 데이터 신선도
         lines += ['', '<b>데이터 신선도</b>']
+        try:
+            from datetime import timezone as _tz_utc
+            from trading_bot.market_calendar import is_us_market_open as _us_open, get_holiday_name as _hname
+            _now_utc = datetime.now(_tz_utc.utc)
+            if not _us_open(_now_utc):
+                _hn = _hname(_now_utc)
+                _us_status = f'US Market: CLOSED — {_hn}' if _hn else 'US Market: CLOSED (weekend)'
+                lines.append(_us_status)
+        except Exception:
+            pass
         ts = macro.get('ts')
         if ts:
             from zoneinfo import ZoneInfo as _ZI
@@ -770,10 +780,21 @@ def cmd_health() -> str:
         fng_row   = _fng_latest()
 
         # 매크로 (26h STALE_BUT_USABLE, 72h MISSING)
-        mac_age   = _age_h(macro_row.get('ts') if macro_row else None)
-        mac_status = _status(mac_age, 26, 72)
+        mac_age    = _age_h(macro_row.get('ts') if macro_row else None)
         mac_zone   = macro_row.get('nasdaq_dxy_zone', '-') if macro_row else '-'
-        lines.append(f'매크로:     {mac_status} ({mac_age:.1f}h)  zone={_html.escape(mac_zone)}')
+        mac_quality = macro_row.get('ratio_quality', 'fresh') if macro_row else 'fresh'
+        if mac_quality == 'holiday':
+            try:
+                from trading_bot.market_calendar import get_holiday_name as _hname, get_last_trading_day as _ltd
+                _hn = _hname(_dt.now(_tz.utc)) or 'US Holiday'
+                _last = _ltd()
+                mac_line = f'매크로:     HOLIDAY — {_html.escape(_hn)} (last: {_last.strftime("%m/%d")} 종가)  zone={_html.escape(mac_zone)}'
+            except Exception:
+                mac_line = f'매크로:     HOLIDAY ({mac_age:.1f}h)  zone={_html.escape(mac_zone)}'
+        else:
+            mac_status = _status(mac_age, 26, 72)
+            mac_line = f'매크로:     {mac_status} ({mac_age:.1f}h)  zone={_html.escape(mac_zone)}'
+        lines.append(mac_line)
 
         # 도미넌스 (3h STALE, 12h MISSING)
         dom_age    = _age_h(dom_row.get('ts') if dom_row else None)
@@ -1107,7 +1128,21 @@ def send_daily_briefing(chat_id: str = None) -> bool:
         brs       = ctx.get('block_reasons', [])
         l1 = '✅ PASS' if tradeable else f'❌ {", ".join(brs[:2])}'
         lines.append(f'L1: {l1}')
-        macro_str = '⚠️ STALE' if stale else ('🚨 EM7' if brs else 'NORMAL')
+        _mac_q = (ctx.get('macro') or {}).get('ratio_quality', 'fresh')
+        if _mac_q == 'holiday':
+            try:
+                from datetime import timezone as _tz_utc
+                from trading_bot.market_calendar import get_holiday_name as _hname_br
+                _hn_br = _hname_br(datetime.now(_tz_utc.utc)) or 'US Holiday'
+                macro_str = f'HOLIDAY — {_hn_br}'
+            except Exception:
+                macro_str = 'HOLIDAY'
+        elif stale:
+            macro_str = '⚠️ STALE'
+        elif brs:
+            macro_str = '🚨 EM7'
+        else:
+            macro_str = 'NORMAL'
         lines.append(f'매크로: {macro_str}')
         regime = get_system_state('last_guardian_regime', 'UNKNOWN') or 'UNKNOWN'
         _cap_map = {'BEAR_CONFIRMED': 0, 'BEAR_WARNING': 0, 'SIDEWAYS': 20,

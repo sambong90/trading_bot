@@ -33,5 +33,8 @@ openai>=1.0.0
 # --- Macro Data Collector ---
 yfinance>=0.2.40
 
+# --- Market Calendar (NYSE 휴장일, soft dependency — 미설치 시 수동 목록 fallback)
+exchange_calendars>=4.0
+
 # --- Research / Scraper ---
 beautifulsoup4>=4.12.0

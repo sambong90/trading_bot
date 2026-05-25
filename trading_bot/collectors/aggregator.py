@@ -130,18 +130,33 @@ def get_market_context() -> dict:
         block_reasons.append('MACRO_DATA_MISSING')
         is_tradeable = False
     else:
-        age_h = _macro_age_hours(macro)
-        if age_h > _STALE_BUT_USABLE_HOURS:
-            # 3일 초과 — 데이터 신뢰 불가, 완전 차단
-            block_reasons.append('RATIO_STALE_EM7')
-            is_tradeable = False
-        elif age_h > _STALE_HOURS_FRESH:
-            # 26h~72h — 이전 데이터 활용 가능하나 신규 진입 사이즈 축소
-            stale_but_usable = True
-            logger.info(
-                '[GUARDIAN] STALE_BUT_USABLE — macro age=%.1fh (≤72h), last known data retained',
-                age_h,
-            )
+        quality = macro.get('ratio_quality', 'fresh')
+        if quality == 'holiday':
+            # 평일 공휴일 — 마지막 거래일 종가가 유효한 최신값, age 체크 생략
+            try:
+                from trading_bot.market_calendar import hours_since_last_close
+                effective_h = hours_since_last_close()
+                if effective_h > _STALE_BUT_USABLE_HOURS:
+                    stale_but_usable = True
+                    logger.info(
+                        '[GUARDIAN] STALE_BUT_USABLE — holiday, hours_since_last_close=%.1fh',
+                        effective_h,
+                    )
+            except Exception:
+                pass  # 캘린더 오류 시 FRESH 처리 유지
+        else:
+            age_h = _macro_age_hours(macro)
+            if age_h > _STALE_BUT_USABLE_HOURS:
+                # 3일 초과 — 데이터 신뢰 불가, 완전 차단
+                block_reasons.append('RATIO_STALE_EM7')
+                is_tradeable = False
+            elif age_h > _STALE_HOURS_FRESH:
+                # 26h~72h — 이전 데이터 활용 가능하나 신규 진입 사이즈 축소
+                stale_but_usable = True
+                logger.info(
+                    '[GUARDIAN] STALE_BUT_USABLE — macro age=%.1fh (≤72h), last known data retained',
+                    age_h,
+                )
 
     if dominance is None:
         block_reasons.append('DOMINANCE_DATA_MISSING')
