@@ -53,13 +53,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── 2. QEMU 설치 (멀티 플랫폼 빌드용) ────────────────────────────
-      # M4(ARM64) 로컬 + 클라우드(AMD64) 동시 지원.
-      # linux/arm64 빌드는 GitHub Actions(ubuntu-latest = amd64) 위에서
-      # QEMU 에뮬레이션으로 크로스 컴파일됨.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       # ── 3. Docker Buildx 설정 ──────────────────────────────────────────
       # 멀티 플랫폼 빌드 및 GHA 캐시 레이어 사용에 필요.
       - name: Set up Docker Buildx
@@ -97,11 +90,8 @@ jobs:
           context: .
           file: Dockerfile
 
-          # 빌드 대상 플랫폼:
-          #   linux/amd64 — GitHub Actions 호스트 (표준 클라우드 노드)
-          #   linux/arm64 — M4 Mac 로컬 + ARM 기반 클라우드 노드 (AWS Graviton 등)
-          # 단일 플랫폼만 필요하면 한 줄로 줄여도 됨. (빌드 시간 약 50% 단축)
-          platforms: linux/amd64,linux/arm64
+          # QEMU 의존성 제거 — amd64 단일 빌드 (OrbStack Rosetta 2로 실행)
+          platforms: linux/amd64
 
           push: true
           tags: ${{ steps.meta.outputs.tags }}
