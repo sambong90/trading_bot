@@ -491,6 +491,26 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
         for _ps in _signals:
             ai_logger.debug('[PATTERN] %s | %s | strength=%.2f | %s',
                             ticker, str(_ps), _ps.strength, _ps.meta)
+            if _ps.strength > 0:
+                try:
+                    from trading_bot.ai_logger import log_ai_event as _log_pat
+                    _pat_extra: dict = {
+                        'pattern': _ps.label,
+                        'strength': _ps.strength,
+                        'vol_ratio': _ps.meta.get('vol_ratio'),
+                    }
+                    if 'DRAGON' in _ps.label:
+                        _pat_extra['body_ratio'] = _ps.meta.get('body_ratio')
+                        _pat_extra['shadow_ratio'] = _ps.meta.get('shadow_ratio')
+                    if 'LOYALTY' in _ps.label:
+                        _pat_extra['drawdown_pct'] = _ps.meta.get('drawdown_pct')
+                    _log_pat(
+                        event_type='PATTERN_DETECTED', ticker=ticker,
+                        signal=_ps.signal, timeframe=DEFAULT_INTERVAL,
+                        extra=_pat_extra,
+                    )
+                except Exception:
+                    pass
         if _pr.fib and current_price:
             ai_logger.debug('[FIB] %s | zone=%s chain=%s',
                             ticker, _pr.fib.zone(current_price),
@@ -564,11 +584,21 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 _update_consec_losses(current_roi)
                 try:
                     from trading_bot.ai_logger import log_ai_event
+                    from trading_bot.risk import get_trailing_peak as _gtp_ts
+                    _ts_peak = _gtp_ts(ticker)
+                    _ts_p2e = round((_ts_peak - float(fill_price_ts or current_price)) / _ts_peak * 100, 2) if _ts_peak > 0 else None
                     log_ai_event(
                         event_type='SCALE_OUT', ticker=ticker, signal='sell',
                         price=fill_price_ts, avg_buy_price=float(avg_buy_price or 0),
                         decision_reason=_trail_reason, roi=current_roi,
                         timeframe=DEFAULT_INTERVAL,
+                        extra={
+                            'peak_price': _ts_peak if _ts_peak > 0 else None,
+                            'peak_to_exit_pct': _ts_p2e,
+                            'exit_adx': None,
+                            'exit_regime': None,
+                            'atr_mult_used': None,
+                        },
                     )
                 except Exception:
                     pass
@@ -727,11 +757,29 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
         _ema_s = float(indicators.get('ema_short', 0) or 0)
         if _ema_s > 0 and (current_price or 0) < _ema_s:
             ai_logger.info('[SKIP] %s | EMA_FILTER | price=%.0f < ema=%.0f', ticker, current_price, _ema_s)
+            try:
+                from trading_bot.ai_logger import log_ai_event as _log_fb
+                _log_fb(
+                    event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                    adx=adx, vol_ratio=vol_ratio, timeframe=DEFAULT_INTERVAL,
+                    extra={'filter': 'EMA_FILTER', 'strength': round(_max_strength, 3)},
+                )
+            except Exception:
+                pass
             return 'skip', f'EMA_FILTER({current_price:.0f}<{_ema_s:.0f})', None
         # RSI 과매수 필터: RSI > 70 이면 로컬 고점 진입 방지
         _rsi_now = float(indicators.get('rsi', 50) or 50)
         if _rsi_now > 70.0:
             ai_logger.info('[SKIP] %s | RSI_OVERBUY | rsi=%.1f', ticker, _rsi_now)
+            try:
+                from trading_bot.ai_logger import log_ai_event as _log_fb
+                _log_fb(
+                    event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                    adx=adx, vol_ratio=vol_ratio, timeframe=DEFAULT_INTERVAL,
+                    extra={'filter': 'RSI_OVERBUY', 'rsi': round(_rsi_now, 1), 'strength': round(_max_strength, 3)},
+                )
+            except Exception:
+                pass
             return 'skip', f'RSI_OVERBUY({_rsi_now:.1f})', None
 
     # 매수: defer_buy(투패스)일 때는 실행하지 않고 pending_buys용 데이터만 반환
@@ -834,6 +882,10 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             logger.info('✅ %s 매도 신호 실행: 가격 %.0f, 비중 %.0f%%', ticker, fill_price_sell, sell_size_pct * 100)
             try:
                 from trading_bot.ai_logger import log_ai_event
+                from trading_bot.scale_out_manager import get_trailing_high as _gth_sell
+                _sell_peak = _gth_sell(ticker)
+                _sell_p2e = round((_sell_peak - float(fill_price_sell or current_price)) / _sell_peak * 100, 2) if _sell_peak > 0 else None
+                _sell_atr_mult = result.get('risk_adjustments', {}).get('atr_trailing_multiplier') if 'TrailingStop' in (reason or '') else None
                 log_ai_event(
                     event_type='EXECUTE', ticker=ticker, signal='sell',
                     price=current_price, avg_buy_price=avg_buy_price,
@@ -842,7 +894,15 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                     size_pct=sell_size_pct,
                     decision_reason=reason, roi=current_roi,
                     api_status='ok',
-                    extra={'scale_out_stage': next_scale_out_stage, 'qty': position_qty_sell},
+                    extra={
+                        'scale_out_stage': next_scale_out_stage,
+                        'qty': position_qty_sell,
+                        'peak_price': _sell_peak if _sell_peak > 0 else None,
+                        'peak_to_exit_pct': _sell_p2e,
+                        'exit_adx': adx,
+                        'exit_regime': regime,
+                        'atr_mult_used': _sell_atr_mult,
+                    },
                 )
             except Exception:
                 pass
@@ -1369,10 +1429,30 @@ def run_cycle(mode):
                     else:
                         logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달, 로테이션 불가 → 매수 중단', MAX_OPEN_POSITIONS)
                         ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached, rotation failed')
+                        try:
+                            from trading_bot.ai_logger import log_ai_event as _log_fb
+                            _log_fb(
+                                event_type='FILTER_BLOCK', ticker=item.get('ticker', ''), signal='buy',
+                                adx=float(item.get('adx', 0) or 0),
+                                extra={'filter': 'MAX_OPEN_POSITIONS',
+                                       'strength': float(item.get('max_pattern_strength', 0) or 0)},
+                            )
+                        except Exception:
+                            pass
                         break
                 else:
                     logger.info('[Pass2] MAX_OPEN_POSITIONS(%s) 도달로 매수 중단', MAX_OPEN_POSITIONS)
                     ai_logger.info('[SKIP] MAX_OPEN_POSITIONS reached (%s)', MAX_OPEN_POSITIONS)
+                    try:
+                        from trading_bot.ai_logger import log_ai_event as _log_fb
+                        _log_fb(
+                            event_type='FILTER_BLOCK', ticker=item.get('ticker', ''), signal='buy',
+                            adx=float(item.get('adx', 0) or 0),
+                            extra={'filter': 'MAX_OPEN_POSITIONS',
+                                   'strength': float(item.get('max_pattern_strength', 0) or 0)},
+                        )
+                    except Exception:
+                        pass
                     break
             # [IMPROVED] 연속 손실 4회+ 시 포지션 크기 0 → 매수 스킵
             position_size = float(item.get('position_size', 0) or 0)
@@ -1390,6 +1470,16 @@ def run_cycle(mode):
             if is_in_buy_cooldown(ticker):
                 logger.info('[매수 스킵] %s — BUY_COOLDOWN (Balanced+)', ticker)
                 ai_logger.info('[SKIP] %s | REASON:SKIP_BUY_COOLDOWN', ticker)
+                try:
+                    from trading_bot.ai_logger import log_ai_event as _log_fb
+                    _log_fb(
+                        event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                        adx=float(item.get('adx', 0) or 0),
+                        extra={'filter': 'BUY_COOLDOWN',
+                               'strength': float(item.get('max_pattern_strength', 0) or 0)},
+                    )
+                except Exception:
+                    pass
                 continue
 
             # ── Phase 4: EM-3 CASH_RULE gate ─────────────────────────────────
@@ -1426,12 +1516,34 @@ def run_cycle(mode):
                                     ticker, _p4_cash_ratio * 100, _cash_floor * 100)
                         ai_logger.info('[SKIP] %s | REASON:CASH_RULE(%.0f%%<%.0f%%)',
                                        ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                        try:
+                            from trading_bot.ai_logger import log_ai_event as _log_fb
+                            _log_fb(
+                                event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                                adx=float(item.get('adx', 0) or 0),
+                                extra={'filter': 'CASH_RULE', 'cash_ratio': round(_p4_cash_ratio * 100, 1),
+                                       'cash_floor': round(_cash_floor * 100, 1),
+                                       'strength': _item_max_strength},
+                            )
+                        except Exception:
+                            pass
                         continue
                 else:
                     logger.info('[CASH_RULE] %s — 현금%.1f%% < 하한%.1f%% → 스킵',
                                 ticker, _p4_cash_ratio * 100, _cash_floor * 100)
                     ai_logger.info('[SKIP] %s | REASON:CASH_RULE(%.0f%%<%.0f%%)',
                                    ticker, _p4_cash_ratio * 100, _cash_floor * 100)
+                    try:
+                        from trading_bot.ai_logger import log_ai_event as _log_fb
+                        _log_fb(
+                            event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                            adx=float(item.get('adx', 0) or 0),
+                            extra={'filter': 'CASH_RULE', 'cash_ratio': round(_p4_cash_ratio * 100, 1),
+                                   'cash_floor': round(_cash_floor * 100, 1),
+                                   'strength': _item_max_strength},
+                        )
+                    except Exception:
+                        pass
                     continue
 
             # Panic Dip-Buy: 보수적 포지션 사이즈 오버라이드 (falling knife 리스크)
@@ -1584,6 +1696,11 @@ def run_cycle(mode):
         logger.info('📋 건너뛴 거래 내역 (%s건):', min(len(skip_reasons), 20))
         for r in skip_reasons[:20]:
             logger.info('  - %s', r)
+    try:
+        from trading_bot.risk import set_system_state as _sss_wdg
+        _sss_wdg('last_cycle_completed', datetime.now().isoformat())
+    except Exception:
+        pass
     logger.info('=' * 80)
     # 버퍼 미플러시로 로그가 안 보이는 경우 방지
     for h in logger.handlers:

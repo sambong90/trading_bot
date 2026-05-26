@@ -389,6 +389,40 @@ def get_weekly_dyn_thr_by_day(days: int = 7) -> dict:
     return result
 
 
+def get_pattern_stats(days: int = 1) -> dict:
+    """패턴 감지 현황 및 필터 차단 통계."""
+    from trading_bot.db import get_session
+    from trading_bot.models import AiEvent
+    since = datetime.now(_UTC) - timedelta(days=days)
+    session = get_session()
+    try:
+        rows = session.query(AiEvent).filter(
+            AiEvent.ts >= since,
+            AiEvent.event.in_(('PATTERN_DETECTED', 'FILTER_BLOCK')),
+        ).order_by(AiEvent.ts.desc()).all()
+    finally:
+        session.close()
+
+    pattern_counts: dict[str, int] = {}
+    filter_counts: dict[str, int] = {}
+    for r in rows:
+        extra = r.extra or {}
+        if r.event == 'PATTERN_DETECTED':
+            pat = extra.get('pattern', 'UNKNOWN')
+            pattern_counts[pat] = pattern_counts.get(pat, 0) + 1
+        elif r.event == 'FILTER_BLOCK':
+            flt = extra.get('filter', 'UNKNOWN')
+            filter_counts[flt] = filter_counts.get(flt, 0) + 1
+
+    return {
+        'days': days,
+        'pattern_counts': pattern_counts,
+        'filter_counts': filter_counts,
+        'total_patterns': sum(pattern_counts.values()),
+        'total_blocks': sum(filter_counts.values()),
+    }
+
+
 def get_best_worst_trades(days: int = 7) -> dict:
     """최근 N일 최고 수익 / 최대 손실 청산 트레이드."""
     from trading_bot.db import get_session

@@ -868,6 +868,25 @@ def cmd_signals() -> str:
                     f'{i}. <code>{html.escape(t.replace("KRW-",""))}</code>  str={s:.3f}'
                 )
 
+        try:
+            from trading_bot.analytics import get_pattern_stats
+            ps = get_pattern_stats(days=1)
+            if ps['total_patterns'] > 0 or ps['total_blocks'] > 0:
+                lines.append('')
+                lines.append('<b>24h 패턴/필터 현황</b>')
+                if ps['pattern_counts']:
+                    pat_str = '  '.join(
+                        f'{k}:{v}' for k, v in sorted(ps['pattern_counts'].items(), key=lambda x: -x[1])
+                    )
+                    lines.append(f'감지: {pat_str}')
+                if ps['filter_counts']:
+                    flt_str = '  '.join(
+                        f'{k}:{v}' for k, v in sorted(ps['filter_counts'].items(), key=lambda x: -x[1])
+                    )
+                    lines.append(f'차단: {flt_str}')
+        except Exception:
+            pass
+
     except Exception as _e:
         lines.append(f'조회 실패: {html.escape(str(_e)[:80])}')
     return '\n'.join(lines)

@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-05-26 — 패턴 감지 및 필터 차단 관측성 복원
+
+### 목적
+PATTERN 로그가 debug 레벨로 억제되어 DRAGON/LOYALTY 감지 여부 확인 불가.
+RSI_OVERBUY 등 필터 차단도 로깅 없이 신호가 소멸되던 문제 해결.
+전략 수정 판단에 필요한 데이터를 DB에 영구 수집.
+
+### 변경 파일
+- tasks/auto_trader.py: 패턴 감지 시 PATTERN_DETECTED 이벤트 ai_events 저장 (strength>0인 건만).
+  EMA_FILTER / RSI_OVERBUY / BUY_COOLDOWN / CASH_RULE / MAX_OPEN_POSITIONS 차단 시 FILTER_BLOCK 이벤트 저장.
+- analytics.py: get_pattern_stats(days) 추가 — 패턴별 감지 수, 필터별 차단 수.
+- telegram_bot.py: /signals 응답에 24h 패턴/필터 현황 블록 추가.
+
+---
+
 ## 2026-05-25 — auto_tuner OOS 검증력 강화
 
 ### 목적
