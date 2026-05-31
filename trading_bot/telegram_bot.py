@@ -248,7 +248,8 @@ def cmd_status() -> str:
             _cap_map = {'BEAR_CONFIRMED': 0, 'BEAR_WARNING': 0, 'SIDEWAYS': 20,
                         'BULL_EARLY': 50, 'BULL_CONFIRMED': 70, 'BULL_CLIMAX': 80}
             cap = _cap_map.get(regime, 0)
-            consec   = int(get_system_state('consec_losses', '0') or 0)
+            from trading_bot.risk import get_consecutive_losses as _gcl_tg
+            consec   = _gcl_tg()  # 단일 소스(orders 기반 + 시간 감쇠)
             base_thr = DYN_THR_BY_REGIME.get(regime, 1.0)
             dyn_thr  = min(0.99, base_thr + consec * 0.02)
             lines.append(f'L2: <b>{html.escape(regime)}</b> (cap {cap}%)')
@@ -1167,7 +1168,8 @@ def send_daily_briefing(chat_id: str = None) -> bool:
         _cap_map = {'BEAR_CONFIRMED': 0, 'BEAR_WARNING': 0, 'SIDEWAYS': 20,
                     'BULL_EARLY': 50, 'BULL_CONFIRMED': 70, 'BULL_CLIMAX': 80}
         cap = _cap_map.get(regime, 0)
-        consec   = int(get_system_state('consec_losses', '0') or 0)
+        from trading_bot.risk import get_consecutive_losses as _gcl_tg2
+        consec   = _gcl_tg2()  # 단일 소스(orders 기반 + 시간 감쇠)
         base_thr = DYN_THR_BY_REGIME.get(regime, 1.0)
         dyn_thr  = min(0.99, base_thr + consec * 0.02)
         lines.append(f'L2: {html.escape(regime)} (cap {cap}%  DYN_THR {dyn_thr:.2f})')

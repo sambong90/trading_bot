@@ -83,6 +83,16 @@ DYN_THR_BY_REGIME: dict = {
 _dyn_thr_override_raw = os.environ.get('DYN_THR_OVERRIDE', '')
 DYN_THR_OVERRIDE: float | None = float(_dyn_thr_override_raw) if _dyn_thr_override_raw else None
 
+# ── 연속 손실 스트릭 사이징/감쇠 (데드락 방지) ─────────────────────────────
+# size_multiplier가 0이 되면 매수 자체가 불가 → 스트릭을 풀 거래가 막히는 데드락.
+# 축소는 유지하되 절대 0이 되지 않도록 floor를 둔다.
+SIZE_MULT_FLOOR = float(os.environ.get('SIZE_MULT_FLOOR', '0.3'))
+# 연속 손실 횟수 → 사이즈 배수. 미정의(4 이상)는 SIZE_MULT_FLOOR 적용.
+SIZE_MULT_BY_STREAK: dict = {0: 1.0, 1: 0.8, 2: 0.6, 3: 0.45}
+# 시간 기반 스트릭 감쇠: 승리로만 풀리는 구조의 출구 경로.
+STREAK_DECAY_HOURS = float(os.environ.get('STREAK_DECAY_HOURS', '24'))  # 마지막 손실 후 24h마다 1 감소
+STREAK_RESET_HOURS = float(os.environ.get('STREAK_RESET_HOURS', '48'))  # 마지막 거래 후 48h 무거래 시 0
+
 # G-11: BUBBLE 연속 발동 임계값 / 매수 축소 배수
 G11_BUBBLE_STREAK_MIN   = int(os.environ.get('G11_BUBBLE_STREAK_MIN',   '3'))
 G11_BUBBLE_BUY_SIZE_MULT = float(os.environ.get('G11_BUBBLE_BUY_SIZE_MULT', '0.5'))

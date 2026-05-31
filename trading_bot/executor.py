@@ -133,18 +133,20 @@ class PaperExecutor:
         except Exception as e:
             print('Failed to persist order:', e)
 
-    def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC'):
+    def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC', reason=None):
         """
         Paper 모드 주문. 티커별 포지션(qty, 평균단가)을 독립 관리.
-        LiveExecutor와 시그니처 동일: side, price, size_pct, ticker.
+        LiveExecutor와 시그니처 동일: side, price, size_pct, ticker, reason.
+        reason: 매도 사유 태그(예: 'CB_FORCED'). orders.raw.exit_reason에 기록되어
+        연속손실 스트릭 계산에서 시스템 방어성 매도를 구분하는 데 쓰인다.
         [C4 FIX] self._lock으로 self.cash / self.positions 동시 접근 보호.
         """
         import logging
         _logger = logging.getLogger(__name__)
         with self._lock:
-            return self._place_order_locked(side, price, size_pct, ticker, _logger)
+            return self._place_order_locked(side, price, size_pct, ticker, _logger, reason)
 
-    def _place_order_locked(self, side, price, size_pct, ticker, _logger):
+    def _place_order_locked(self, side, price, size_pct, ticker, _logger, reason=None):
         """Inner implementation of place_order; called with self._lock already held."""
         # validation
         self._update_stage('C.validation', 20)
@@ -218,6 +220,8 @@ class PaperExecutor:
             self.cash += proceeds
             rec = {'time': datetime.utcnow().isoformat(), 'side': 'sell', 'price': price, 'qty': sell_qty, 'ticker': ticker}
             rec['entry_price'] = pos.get('avg_price', 0.0)  # 연속 손실 계산용
+            if reason:
+                rec['exit_reason'] = reason  # 예: CB_FORCED (스트릭 계산 제외용)
             self.log.append(rec)
             pos['qty'] -= sell_qty
             if pos['qty'] <= 1e-12:  # 부동소수점 찌꺼기 정리
@@ -353,11 +357,13 @@ class LiveExecutor:
     HARD_STOP_LOSS_PCT = None
 
     def _get_hard_stop_loss_pct(self):
-        import os
+        # 단일 소스: config.HARD_STOP_LOSS_PCT (= env HARD_STOP_LOSS_PCT > -15.0).
+        # 하드코딩 -10.0 폴백 제거 — env 누락 시 config 기본값(-15.0) 적용.
+        from trading_bot.config import HARD_STOP_LOSS_PCT
         try:
-            return float(os.environ.get('HARD_STOP_LOSS_PCT', '-10.0'))
+            return float(HARD_STOP_LOSS_PCT)
         except (TypeError, ValueError):
-            return -10.0
+            return -15.0
 
     def check_hard_stop_loss(self, ticker, current_price):
         """
@@ -430,7 +436,7 @@ class LiveExecutor:
             _logger.warning('[주문 취소] 조회 실패: %s', e)
             return []
 
-    def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC'):
+    def place_order(self, side, price, size_pct=1.0, ticker='KRW-BTC', reason=None):
         """
         실제 거래 주문 실행 (개선된 버전)
 
@@ -439,6 +445,8 @@ class LiveExecutor:
         - price: 주문 가격
         - size_pct: 포지션 크기 비율
         - ticker: 거래할 코인 티커 (하드코딩 제거)
+        - reason: 매도 사유 태그(예: 'CB_FORCED'). orders.raw.exit_reason에 기록 →
+          연속손실 스트릭 계산에서 시스템 방어성 매도 구분
         """
         import os, pandas as pd, logging
         _logger = logging.getLogger(__name__)
@@ -605,6 +613,8 @@ class LiveExecutor:
                             # [H5 FIX] 매도 전 캡처한 평균 매수가 → risk.get_consecutive_losses() 정상 동작
                             'entry_price': entry_price_snapshot,
                         }
+                        if reason:
+                            rec['exit_reason'] = reason  # 예: CB_FORCED (스트릭 계산 제외용)
 
                     try:
                         self._persist_order({**rec, 'order_id': order_id}, status='filled')

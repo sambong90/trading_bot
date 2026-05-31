@@ -267,7 +267,9 @@ def sync_manual_trades(executor, tickers):
 
 
 def _update_consec_losses(roi: float) -> None:
-    """매도 ROI 기반으로 system_state의 연속 손실 카운터를 갱신."""
+    """[LEGACY] system_state.consec_losses 갱신 — 표시/외부 대시보드용 캐시.
+    의사결정(DYN_THR/사이징/Kelly/표시)은 risk.get_consecutive_losses() 단일 소스만 참조한다.
+    이 키는 어떤 매매 판단에도 더 이상 사용되지 않는다."""
     try:
         from trading_bot.risk import get_system_state, set_system_state
         current = int(get_system_state('consec_losses', '0') or 0)
@@ -730,9 +732,9 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
     if signal == 'buy':
         # Dynamic Signal Threshold — 장세별 base + 연속 손실 streak 페널티
         try:
-            from trading_bot.risk import get_system_state as _gss_dyn
+            from trading_bot.risk import get_consecutive_losses as _gcl_dyn
             from trading_bot.config import DYN_THR_BY_REGIME, DYN_THR_OVERRIDE
-            _consec = int(_gss_dyn('consec_losses', '0') or 0)
+            _consec = _gcl_dyn()  # 단일 소스(orders 기반 + 시간 감쇠)
             _regime_base = (DYN_THR_OVERRIDE if DYN_THR_OVERRIDE is not None
                             else DYN_THR_BY_REGIME.get(guardian_regime, DYNAMIC_THR_BASE))
             _dyn_thr = min(DYNAMIC_THR_MAX, _regime_base + _consec * DYNAMIC_THR_PENALTY)
@@ -781,6 +783,30 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
             except Exception:
                 pass
             return 'skip', f'RSI_OVERBUY({_rsi_now:.1f})', None
+
+    # 무성 드롭 방지: buy 신호가 게이트를 통과했으나 position_size=0이면 관측 가능하게 기록.
+    # (floor 적용 후엔 정상 상황에서 발생하지 않아야 함 → 발생 시 데드락/설정 이상 신호)
+    if signal == 'buy' and position_size <= 0:
+        _zs_consec = 0
+        try:
+            from trading_bot.risk import get_consecutive_losses as _gcl_zs
+            _zs_consec = _gcl_zs()
+        except Exception:
+            pass
+        _zs_mult = float((result.get('risk_adjustments') or {}).get('position_size_multiplier', 0.0))
+        logger.warning('[ZERO_SIZE] %s — buy 신호 통과했으나 position_size=0 (consec=%s mult=%.2f) → 드롭',
+                       ticker, _zs_consec, _zs_mult)
+        try:
+            from trading_bot.ai_logger import log_ai_event as _log_zs
+            _log_zs(
+                event_type='FILTER_BLOCK', ticker=ticker, signal='buy',
+                adx=adx, vol_ratio=vol_ratio, timeframe=DEFAULT_INTERVAL,
+                extra={'filter': 'ZERO_SIZE', 'consec_losses': _zs_consec,
+                       'size_multiplier': _zs_mult, 'strength': round(_max_strength, 3)},
+            )
+        except Exception:
+            pass
+        return 'skip', 'ZERO_SIZE', None
 
     # 매수: defer_buy(투패스)일 때는 실행하지 않고 pending_buys용 데이터만 반환
     if signal == 'buy' and position_size > 0:
@@ -1262,7 +1288,7 @@ def run_cycle(mode):
                     cur_p = pyupbit.get_current_price(t)
                     if cur_p and cur_p * qty * 0.5 >= MIN_ORDER_KRW:
                         try:
-                            executor.place_order('sell', cur_p, size_pct=0.5, ticker=t)
+                            executor.place_order('sell', cur_p, size_pct=0.5, ticker=t, reason='CB_FORCED')
                             logger.info('🔴 [CB] %s 포지션 50%% 축소 실행 (가격 %.0f)', t, cur_p)
                             ai_logger.info('[EXECUTE] %s | ACTION:SELL | CB_50PCT | price:%.0f', t, cur_p)
                             _cb_log(t, 'sell', TAG_CB_SELL, cur_p)
@@ -1573,8 +1599,8 @@ def run_cycle(mode):
                 )
             # v7: Fractional Kelly cap — 거래당 최대 3.93% × equity
             try:
-                from trading_bot.risk import get_system_state as _gss_kelly
-                _consec_k  = int(_gss_kelly('consec_losses', '0') or 0)
+                from trading_bot.risk import get_consecutive_losses as _gcl_kelly
+                _consec_k  = _gcl_kelly()  # 단일 소스(orders 기반 + 시간 감쇠)
                 _kelly_cap = total_equity * KELLY_FRACTION
                 _streak_over = max(0, _consec_k - KELLY_STREAK_THR)
                 if _streak_over > 0:

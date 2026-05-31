@@ -10,32 +10,62 @@ def check_total_drawdown(current_value, peak_value, max_drawdown_pct=0.15):
 # [NEW] Order 테이블에서 실제 연속 손실 횟수 계산 (Paper/Live 공통)
 def get_consecutive_losses() -> int:
     """
-    가장 최근 체결(Order) 기준으로 연속 손실 횟수 반환.
+    연속 손실 횟수의 단일 소스. orders 기반 raw 스트릭 + 시간 감쇠 적용.
     손실 = sell 체결가 < raw.entry_price.
+    시간 감쇠(데드락 출구 경로):
+      - 마지막 손실로부터 STREAK_DECAY_HOURS(기본 24h)마다 1 감소
+      - 마지막 거래로부터 STREAK_RESET_HOURS(기본 48h) 무거래 시 0으로 리셋
+    DYN_THR 페널티와 size_multiplier 모두 이 함수만 참조해야 한다.
     계산 실패 시 0 반환.
     """
     try:
+        from datetime import datetime, timezone
         from trading_bot.db import get_session
         from trading_bot.models import Order
+        from trading_bot.config import STREAK_DECAY_HOURS, STREAK_RESET_HOURS
         session = get_session()
         try:
             rows = session.query(Order).filter(Order.side == 'sell').order_by(Order.ts.desc()).limit(50).all()
             if not rows:
                 return 0
-            consecutive = 0
+            raw_streak = 0
+            last_loss_ts = None
             for r in rows:
                 raw = r.raw if isinstance(r.raw, dict) else {}
+                if raw.get('exit_reason') == 'CB_FORCED':
+                    continue  # CB 강제매도는 전략 진입 실패가 아님 → 스트릭 제외(투명)
                 entry_price = float(raw.get('entry_price', 0) or 0)
                 sell_price = float(r.price or 0)
                 if entry_price <= 0:
                     continue  # entry_price 미기록 행은 스킵 (streak 유지)
                 if sell_price < entry_price:
-                    consecutive += 1
+                    raw_streak += 1
+                    if last_loss_ts is None:
+                        last_loss_ts = r.ts
                 else:
                     break
-            return consecutive
+            if raw_streak == 0:
+                return 0
+            last_order = session.query(Order).order_by(Order.ts.desc()).first()
+            last_trade_ts = last_order.ts if last_order else last_loss_ts
         finally:
             session.close()
+
+        now = datetime.now(timezone.utc)
+
+        def _hours(ts):
+            if ts is None:
+                return 0.0
+            if getattr(ts, 'tzinfo', None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (now - ts).total_seconds() / 3600.0
+
+        # 마지막 거래 후 무거래가 길면 스트릭 자체를 리셋
+        if STREAK_RESET_HOURS > 0 and _hours(last_trade_ts) >= STREAK_RESET_HOURS:
+            return 0
+        # 마지막 손실 경과 시간만큼 단계적 감쇠
+        decay = int(_hours(last_loss_ts) // STREAK_DECAY_HOURS) if STREAK_DECAY_HOURS > 0 else 0
+        return max(0, raw_streak - decay)
     except Exception:
         return 0
 
@@ -54,6 +84,8 @@ def get_win_rate(lookback: int = 20) -> float:
             valid = 0
             for r in rows:
                 raw = r.raw if isinstance(r.raw, dict) else {}
+                if raw.get('exit_reason') == 'CB_FORCED':
+                    continue  # CB 강제매도는 전략 성과가 아님 → 승률 계산 제외
                 entry_price = float(raw.get('entry_price', 0) or 0)
                 sell_price = float(r.price or 0)
                 if entry_price <= 0:
@@ -79,21 +111,16 @@ def calculate_adjusted_position_size(
     consecutive_losses = get_consecutive_losses() if use_dynamic_adjustment else 0
     win_rate = get_win_rate() if use_dynamic_adjustment else 0.5
 
-    multiplier = 1.0
-    is_defensive = False
+    from trading_bot.config import SIZE_MULT_BY_STREAK, SIZE_MULT_FLOOR
 
-    if consecutive_losses >= 4:
-        multiplier = 0.0
+    # 연속 손실 → 사이즈 배수 (절대 0 금지: floor 적용으로 데드락 방지)
+    multiplier = SIZE_MULT_BY_STREAK.get(consecutive_losses, SIZE_MULT_FLOOR)
+    multiplier = max(SIZE_MULT_FLOOR, multiplier)
+    is_defensive = consecutive_losses >= 2
+    if win_rate < 0.4:
+        multiplier = min(multiplier, 0.75)
         is_defensive = True
-    elif consecutive_losses == 3:
-        multiplier = 0.5
-        is_defensive = True
-    elif consecutive_losses == 2:
-        multiplier = 0.75
-        is_defensive = True
-    elif win_rate < 0.4:
-        multiplier = 0.75
-        is_defensive = True
+    multiplier = max(SIZE_MULT_FLOOR, multiplier)
 
     base_size = account_value * risk_per_trade_pct / (stop_loss_pct or 0.05)
     adjusted = base_size * multiplier

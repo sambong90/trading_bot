@@ -29,6 +29,9 @@ CB_PREWARNING_RATIO = 0.80    # CB 기준의 80% 도달 시 경고
 UPBIT_FAIL_THRESHOLD = 3      # Upbit API 연속 실패 기준 횟수
 NO_TRADE_HOURS = 24           # 무거래 알림 기준 (시간)
 COOLDOWN_HOURS = 1            # 동일 이상 알림 쿨다운 (시간)
+LOSS_STREAK_WARN = 3          # 연속 손실 알림 기준 (회)
+LOSS_STREAK_PERSIST_HOURS = 24  # 해당 스트릭이 이 시간 이상 지속 시 알림
+SIZE_MULT_WARN = 0.5          # size_multiplier 알림 기준 (이하)
 
 BULL_REGIMES = {'BULL_EARLY', 'BULL_CONFIRMED', 'BULL_CLIMAX'}
 
@@ -318,6 +321,57 @@ def _check_no_trade() -> None:
         logger.warning('[watchdog] 무거래 체크 실패: %s', e)
 
 
+def _check_loss_streak() -> None:
+    """8b. 연속 손실 페널티 장기 지속/사이즈 축소 감지 (데드락 조기 경보)."""
+    try:
+        from trading_bot.risk import get_consecutive_losses, get_system_state
+        from trading_bot.config import DYN_THR_BY_REGIME, SIZE_MULT_BY_STREAK, SIZE_MULT_FLOOR
+        from trading_bot.db import get_session
+        from trading_bot.models import Order
+
+        consec = get_consecutive_losses()
+        if consec < LOSS_STREAK_WARN:
+            return
+
+        mult = max(SIZE_MULT_FLOOR, SIZE_MULT_BY_STREAK.get(consec, SIZE_MULT_FLOOR))
+        # 사이즈 축소 진입 알림 (1회)
+        if mult <= SIZE_MULT_WARN and _should_alert('size_mult_low'):
+            _send(f'⚠️ 포지션 사이즈 배수 {mult:.2f} (연속손실 {consec}회) — 진입 축소 중')
+
+        # 현재 스트릭의 가장 오래된 손실 시각 → 지속 시간 계산
+        session = get_session()
+        try:
+            rows = session.query(Order).filter(Order.side == 'sell').order_by(Order.ts.desc()).limit(50).all()
+        finally:
+            session.close()
+        streak_start_ts = None
+        for r in rows:
+            raw = r.raw if isinstance(r.raw, dict) else {}
+            entry = float(raw.get('entry_price', 0) or 0)
+            sell_price = float(r.price or 0)
+            if entry <= 0:
+                continue
+            if sell_price < entry:
+                streak_start_ts = r.ts  # 루프 종료 시 가장 오래된 손실
+            else:
+                break
+        persisted_h = _elapsed_hours(streak_start_ts)
+        if persisted_h < LOSS_STREAK_PERSIST_HOURS:
+            return
+
+        regime = get_system_state('last_guardian_regime', 'UNKNOWN') or 'UNKNOWN'
+        base_thr = DYN_THR_BY_REGIME.get(regime, 1.0)
+        penalty = consec * 0.02
+        dyn_thr = min(0.99, base_thr + penalty)
+        if _should_alert('loss_streak'):
+            _send(
+                f'⚠️ 연속손실 {consec}회, {persisted_h:.0f}h 지속 — '
+                f'DYN_THR +{penalty:.2f}(={dyn_thr:.2f}), size×{mult:.2f} 적용 중'
+            )
+    except Exception as e:
+        logger.warning('[watchdog] 연속손실 체크 실패: %s', e)
+
+
 # ---------------------------------------------------------------------------
 # 이상 감지 체크 — 데이터
 # ---------------------------------------------------------------------------
@@ -430,6 +484,7 @@ def run_watchdog() -> None:
         _check_slippage()
         _check_cb_prewarning()
         _check_no_trade()
+        _check_loss_streak()
         _check_macro_staleness()
         _check_kimp_staleness()
         _check_fng_staleness()

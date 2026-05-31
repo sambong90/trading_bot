@@ -161,8 +161,8 @@ def get_risk_metrics(days: int = 30) -> dict:
 
         consec_losses = 0
         try:
-            from trading_bot.risk import get_system_state
-            consec_losses = int(get_system_state('consec_losses', '0') or 0)
+            from trading_bot.risk import get_consecutive_losses
+            consec_losses = get_consecutive_losses()  # 단일 소스(orders 기반 + 시간 감쇠)
         except Exception:
             pass
 

@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## 2026-05-31 — HARD_STOP 임계값 출처 통일 + CB 강제매도 스트릭 분리
+
+### 목적
+데드락 수정 후속 정적 점검 2건 정리.
+1) HARD_STOP 임계값이 executor에서 env 직접참조(폴백 -10.0)라 config(-15.0)와 분기 →
+   env 누락 시 의도보다 빡빡한 -10% 조기 손절 위험.
+2) CB(DD 5/15%) 강제 50% 매도 손실이 orders에 남아 연속손실 스트릭을 오염 →
+   "시장 급락(시스템 방어)"을 "전략 진입 실패"로 오인해 다음 진입에 페널티 전가.
+
+### 변경 파일
+- executor.py: _get_hard_stop_loss_pct()가 config.HARD_STOP_LOSS_PCT 단일 소스 참조
+  (env override는 config가 이미 흡수: env > -15.0). 하드코딩 -10.0 폴백 제거.
+  PaperExecutor/LiveExecutor place_order에 reason 파라미터 추가 → 매도 시
+  orders.raw.exit_reason에 기록(예: CB_FORCED).
+- tasks/auto_trader.py: CB 강제 50% 매도 호출에 reason='CB_FORCED' 전달.
+- risk.py: get_consecutive_losses()·get_win_rate()가 raw.exit_reason=='CB_FORCED' 매도를
+  계산에서 스킵(투명). 일반 손절(HARD_STOP/FIB/TRAIL, 무태그)은 그대로 포함.
+
+### 검증
+- env HARD_STOP_LOSS_PCT 제거 시 config -15.0 적용(우선순위 env > -15.0) — 정적 확인.
+- 로직 시뮬레이션: CB_FORCED 손실/이익 모두 스트릭·승률에서 제외(투명), 무태그 손절은 계속 카운트.
+- 과거 CB_SELL 2건(최종 2026-03-15)은 태그 이전이라 소급 제외 안 됨 — 전향적 적용.
+- 단위 테스트: 변경 전후 동일(13 pass / 23 fail, 기존 환경 namespace 이슈로 무관).
+- 제약 준수: 데드락 수정(floor 0.3, 시간감쇠) 미변경, CB(5/15%)·HARD_STOP(-15%) 임계값 자체 미변경.
+
+---
+
+## 2026-05-31 — 연속 손실 자기강화 잠금(데드락) 해소
+
+### 목적
+연속 손실 스트릭이 DYN_THR 상향 + position_size 0을 동시에 일으켜
+손실 후 회복 진입을 스스로 봉쇄하는 데드락 제거.
+(손실→스트릭↑→사이즈0+임계값↑→매수불가→청산없음→승리없음→스트릭 영구고정)
+TRADE_BLOCKAGE_TRACE.md 추적으로 확정: 48h buy 신호 16건 전량 미체결,
+13건 DYN_THR(0.66) 차단, position_size_multiplier=0.0(연속손실4) 잠재 데드락.
+
+### 변경 파일
+- config.py: SIZE_MULT_FLOOR(0.3), SIZE_MULT_BY_STREAK(0:1.0,1:0.8,2:0.6,3:0.45),
+  STREAK_DECAY_HOURS(24), STREAK_RESET_HOURS(48) 상수 추가.
+- risk.py: get_consecutive_losses()를 단일 소스로 통일 + 시간 감쇠 통합
+  (마지막 손실 후 24h마다 1 감소, 마지막 거래 후 48h 무거래 시 0 리셋).
+  calculate_adjusted_position_size: multiplier 0.0 제거, floor 0.3 적용.
+- tasks/auto_trader.py: DYN_THR/Kelly 페널티가 get_consecutive_losses() 단일 소스 참조.
+  buy 신호 통과 후 position_size<=0 시 FILTER_BLOCK(ZERO_SIZE) 기록 + WARNING(무성 드롭 제거).
+  _update_consec_losses는 표시용 legacy로 격하(의사결정 비참조).
+- analytics.py, telegram_bot.py: 표시용 연속손실도 get_consecutive_losses() 단일 소스로 전환.
+- watchdog.py: _check_loss_streak 추가 — 연속손실>=3, 24h 지속 시 / size_mult<=0.5 진입 시 알림.
+
+### 검증
+- 실데이터(orders): raw streak 4, 마지막 거래 120h 전 → 신규 로직 effective=0(48h 리셋).
+  size_multiplier 0.0→1.0, DYN_THR(BULL_EARLY) 0.66→0.60. CPOOL(str 0.645) 통과 가능.
+- 단위 테스트: 변경 전후 동일(13 pass / 23 fail, 기존 환경 namespace 이슈로 무관).
+- 제약 준수: 페널티 개념 유지, DYN_THR_BY_REGIME base 미변경, HARD_STOP/CB 미수정.
+
+---
+
 ## 2026-05-26 — 패턴 감지 및 필터 차단 관측성 복원
 
 ### 목적
