@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## 2026-06-01 — 4h(minute240) 전 종목 수집 확대
+
+### 목적
+4h confluence(load_4h_ema_state, 4h 데드크로스 시 buy_size_pct ×0.5)가 구현돼 있으나
+minute240 데이터가 47/230종목에만 존재(전용 수집 잡 부재, load_4h_ema_state의 on-demand
+fetch로만 우연히 적재) → 183종목(80%)에서 4h confluence가 침묵하고 항상 100% 사이즈로 진입.
+4h 데이터를 모니터링 전 종목에 채워 기존 confluence 로직을 전 종목에서 작동시킨다.
+(MTF_STRUCTURE_ANALYSIS.md 1순위 권고)
+
+### 변경 파일
+- config.py: FOURH_OHLCV_COUNT(기본 100) 추가 — 종목별 4h 확보 봉 수(EMA26+5=31봉 이상).
+- tasks/scheduler_service.py: collect_4h_ohlcv() 추가 — get_all_krw_tickers() 전 종목에
+  fetch_ohlcv(interval='minute240', count=FOURH_OHLCV_COUNT, use_db_first=True) 호출로
+  DB 적재(fetch_ohlcv가 ON CONFLICT DO NOTHING으로 영속화). 4h봉 마감 직후 cron
+  (KST 01/05/09/13/17/21 +5분, 6회/일) + 부팅 +45초 초기 백필 1회 등록.
+  timedelta 상위 import 추가.
+
+### 제약 준수
+- 진입/청산 로직·confluence(×0.5) 미변경 — 데이터만 채움.
+- load_4h_ema_state(count=100, EMA12/26, None 반환 시 스킵) 미변경 →
+  31봉 미달 신규 종목은 기존대로 confluence 자동 스킵, 데이터 쌓이면 자동 활성화.
+- 별도 cron(BackgroundScheduler 스레드풀)이라 1h 매매 사이클(auto_trader Popen) 미지연.
+- use_db_first=True + stale 2h 정책으로 4h봉 미변경 시 DB 캐시 → API는 1h 수집의 1/4 빈도.
+
+### 검증 (배포 후 스케줄러 실행 시점)
+- minute240 보유 종목 47 → 약 60(유니버스)로 증가.
+- load_4h_ema_state가 전 종목에서 None 아닌 (golden, es, el) 반환.
+- 4h 데드크로스 종목 매수 시 decision_reason에 '4h Confluence: 데드크로스 → 비중 50%' 기록.
+- 정적 검증: py_compile PASS. 런타임 검증은 배포 후 아래 쿼리로 확인.
+  SELECT count(DISTINCT ticker) FROM ohlcv WHERE timeframe='minute240';
+
 ## 2026-05-31 — HARD_STOP 임계값 출처 통일 + CB 강제매도 스트릭 분리
 
 ### 목적

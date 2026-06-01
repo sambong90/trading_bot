@@ -67,6 +67,8 @@ PANIC_DIP_BUY_SIZE_PCT = float(os.environ.get('PANIC_DIP_BUY_SIZE_PCT', '0.3'))
 
 # Multi-TF 4h Confluence 활성화
 MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+# 4h(minute240) 전 종목 수집 시 종목별 확보 봉 수. load_4h_ema_state는 EMA26+5=31봉 이상 필요.
+FOURH_OHLCV_COUNT = int(os.environ.get('FOURH_OHLCV_COUNT', '100'))
 
 # ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
 # BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.

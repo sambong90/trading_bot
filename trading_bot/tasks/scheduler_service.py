@@ -18,7 +18,7 @@ import json
 import signal
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # KST 타임존 강제 설정 (컨테이너 기본 UTC → 한국 표준시로 로그 시각 통일)
 os.environ['TZ'] = 'Asia/Seoul'
@@ -464,6 +464,42 @@ def collect_btc_weekly() -> None:
         _notify_scheduler(f'[collect_btc_weekly] 오류: {e}')
 
 
+def collect_4h_ohlcv() -> None:
+    """4h(minute240) OHLCV를 모니터링 전 종목에 대해 수집·DB 적재.
+
+    실행 주기: 4h봉 마감 직후(KST 01/05/09/13/17/21 + 5분) — 6회/일.
+    fetch_ohlcv(use_db_first=True)가 stale(>2h) 시에만 API 호출 후 DB 저장하므로
+    호출당 API 부하는 1h 수집의 1/4 수준. load_4h_ema_state(EMA12/26, >=31봉)가
+    전 종목에서 작동하도록 데이터만 채운다(진입/청산·confluence 로직 불변).
+    31봉 미달 신규 종목은 load_4h_ema_state가 None 반환 → confluence 자동 스킵 유지.
+    """
+    _log('[수집] collect_4h_ohlcv 실행')
+    try:
+        from trading_bot.data import get_all_krw_tickers, fetch_ohlcv
+        from trading_bot.config import FOURH_OHLCV_COUNT
+        tickers = get_all_krw_tickers(use_db_fallback=True)
+        ok = 0
+        fail = 0
+        for _t in tickers:
+            try:
+                df = fetch_ohlcv(ticker=_t, interval='minute240',
+                                 count=FOURH_OHLCV_COUNT, use_db_first=True)
+                if df is not None and len(df) > 0:
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception as _e:
+                fail += 1
+                _log(f'[수집] collect_4h_ohlcv {_t} 실패: {_e}', 'warning')
+            time.sleep(0.1)  # Upbit rate-limit 여유
+        _log(f'[수집] collect_4h_ohlcv 완료 — 성공 {ok} / 실패 {fail} / 대상 {len(tickers)}')
+        if tickers and ok == 0:
+            _notify_scheduler('⚠️ [4h OHLCV] 전 종목 수집 실패 — load_4h_ema_state 비활성 우려')
+    except Exception as e:
+        _log(f'[수집] collect_4h_ohlcv 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_4h_ohlcv] 오류: {e}')
+
+
 def run_db_maintenance() -> None:
     """DB 하우스키핑(Pruning): 오래된 데이터 삭제. 매일 1회 실행."""
     _log('[스케줄러] db_maintenance 실행')
@@ -626,6 +662,17 @@ _log('FNG 수집 스케줄 등록 (4회/일 — HH:30 at 00/06/12/18 KST)')
 sched.add_job(collect_btc_weekly, 'cron', hour=8, minute=5,
               id='collect_btc_weekly', misfire_grace_time=300)
 _log('BTC 주봉 200MA 수집 스케줄 등록 (매일 08:05 KST)')
+
+# 4h(minute240) 전 종목 수집: 4h봉 마감 직후 — 6회/일 (1h 매매 사이클과 별도)
+# Upbit minute240은 UTC 00시(=KST 09시) 정렬 → KST 01/05/09/13/17/21 마감.
+sched.add_job(collect_4h_ohlcv, 'cron', hour='1,5,9,13,17,21', minute=5,
+              id='collect_4h_ohlcv', misfire_grace_time=600)
+_log('4h OHLCV 전 종목 수집 스케줄 등록 (6회/일 — KST 01/05/09/13/17/21 +5분)')
+# 부팅 직후 1회 백필: 데이터 없는 종목 즉시 채워 다음 매수 사이클부터 confluence 작동.
+sched.add_job(collect_4h_ohlcv, 'date',
+              run_date=datetime.now() + timedelta(seconds=45),
+              id='collect_4h_ohlcv_initial', misfire_grace_time=600)
+_log('4h OHLCV 초기 백필 1회 예약 (부팅 +45초)')
 
 # ── 기존 유지보수 Job ────────────────────────────────────────────────────────
 
