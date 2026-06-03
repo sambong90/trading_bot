@@ -49,19 +49,23 @@ def _oldest_ts(session, ticker, tf):
     ).scalar()
 
 
-def _fetch_with_backoff(ticker, tf, to_str, sleep_s, retries=5):
-    """pyupbit 호출 + 429/오류 지수 백오프. 실패 시 None."""
-    delay = max(sleep_s, 0.2)
+def _fetch_with_backoff(ticker, tf, to_str, sleep_s, retries=8):
+    """pyupbit 호출 + 백오프. pyupbit는 429(레이트리밋)에 예외 대신 None을 반환하므로
+    None/빈응답도 재시도 대상으로 처리(과거 데이터가 남아있는데 조기 종료되는 것 방지).
+    retries회 모두 None이면 진짜 한계(상장)이거나 지속 실패로 보고 None 반환."""
+    delay = max(sleep_s, 0.3)
     for _ in range(retries):
         try:
-            return pyupbit.get_ohlcv(ticker, interval=tf, to=to_str, count=200)
+            df = pyupbit.get_ohlcv(ticker, interval=tf, to=to_str, count=200)
+            if df is not None and len(df) > 0:
+                return df
+            # None/빈응답 = 레이트리밋 가능 → 백오프 후 재시도
+            time.sleep(delay * 3)
+            delay = min(delay * 1.5, 10)
         except Exception as e:
             s = str(e).lower()
-            if '429' in s or 'too many' in s or 'rate' in s:
-                time.sleep(delay * 4)
-                delay *= 2
-            else:
-                time.sleep(delay * 2)
+            time.sleep(delay * (4 if ('429' in s or 'too many' in s or 'rate' in s) else 2))
+            delay = min(delay * 2, 20)
     return None
 
 
