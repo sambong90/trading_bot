@@ -79,6 +79,7 @@ OHLCV_FULL_UNIVERSE = os.environ.get('OHLCV_FULL_UNIVERSE', '1').strip().lower()
 COLLECT_SLEEP_SEC = float(os.environ.get('COLLECT_SLEEP_SEC', '0.15'))
 # 타임프레임별 종목당 확보 봉 수(pyupbit 단일 호출 최대 200).
 ONE_MIN_OHLCV_COUNT = int(os.environ.get('ONE_MIN_OHLCV_COUNT', '200'))
+FIVE_MIN_OHLCV_COUNT = int(os.environ.get('FIVE_MIN_OHLCV_COUNT', '200'))
 M15_OHLCV_COUNT     = int(os.environ.get('M15_OHLCV_COUNT', '200'))
 M30_OHLCV_COUNT     = int(os.environ.get('M30_OHLCV_COUNT', '200'))
 H1_FULL_OHLCV_COUNT = int(os.environ.get('H1_FULL_OHLCV_COUNT', '200'))

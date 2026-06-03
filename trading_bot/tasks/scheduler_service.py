@@ -736,15 +736,21 @@ _log('4h OHLCV 초기 백필 1회 예약 (부팅 +45초)')
 # ── 연구 모드: 전 종목 × 전 타임프레임 OHLCV 풀 수집 ─────────────────────────
 # 매매 무엣지 확정 후 신규 전략 설계용 데이터 축적. 매매/청산 사이클과 독립 실행.
 if os.environ.get('OHLCV_COLLECT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on'):
-    from trading_bot.config import (ONE_MIN_OHLCV_COUNT, M15_OHLCV_COUNT, M30_OHLCV_COUNT,
-                                    H1_FULL_OHLCV_COUNT, DAY_OHLCV_COUNT, WEEK_OHLCV_COUNT,
-                                    MONTH_OHLCV_COUNT)
+    from trading_bot.config import (ONE_MIN_OHLCV_COUNT, FIVE_MIN_OHLCV_COUNT, M15_OHLCV_COUNT,
+                                    M30_OHLCV_COUNT, H1_FULL_OHLCV_COUNT, DAY_OHLCV_COUNT,
+                                    WEEK_OHLCV_COUNT, MONTH_OHLCV_COUNT)
 
     # 1분봉: 5분마다 최근 N봉 묶음 수집 (매분 호출 대비 API 1/5). 정시 충돌 회피 위해 +30초.
     sched.add_job(lambda: _collect_ohlcv_bulk('minute1', ONE_MIN_OHLCV_COUNT, '1m'),
                   'cron', minute='*/5', second=30, id='collect_1m',
                   max_instances=1, misfire_grace_time=240)
     _log('1분봉 전 종목 수집 스케줄 등록 (5분마다 — 매매 사이클과 독립)')
+
+    # 5분봉: 5분마다 최근 N봉. 1m(:30)과 초 오프셋 분리(:45)해 동시 버스트 완화.
+    sched.add_job(lambda: _collect_ohlcv_bulk('minute5', FIVE_MIN_OHLCV_COUNT, '5m'),
+                  'cron', minute='*/5', second=45, id='collect_5m',
+                  max_instances=1, misfire_grace_time=240)
+    _log('5분봉 전 종목 수집 스케줄 등록 (5분마다)')
 
     # 15분봉: 15분봉 마감 직후(+2분). 30분봉: 30분봉 마감 직후(+3분).
     sched.add_job(lambda: _collect_ohlcv_bulk('minute15', M15_OHLCV_COUNT, '15m'),
