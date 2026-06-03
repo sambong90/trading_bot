@@ -1,6 +1,17 @@
 # CHANGELOG
 
-## 2026-06-03 — Phase 6: 최대 데이터 확보 (보관 무기한 + 최대 소급 백필)
+## 2026-06-03 — 라이브 수집 tz 병합 버그 수정 + 5분봉 라이브 추가
+
+### data.py fetch_ohlcv 병합 버그 (라이브 최대 2h 지연·구멍 원인)
+- fresh-path에서 신규 봉 병합 시 df_api(tz-naive KST) vs df_db(tz-aware UTC) 비교 → TypeError → except 폴백으로
+  신규 봉을 못 붙임. DB가 stale(>2h) 될 때만 full-fetch로 따라잡아 톱니형 최대 2h 지연 + 최근 구간 구멍 발생(예: BTC 1m 10:02~13:18).
+- 수정: df_api·df_db 시간을 양쪽 UTC로 정규화 후 비교·병합. 매 5분 실행 시 최신 50봉을 정상 append → 전진 구멍 없음.
+- 영향: 1m/5m/15m/30m/60m 라이브 수집 전부 실시간화. 검증: 병합이 fresh 50봉 정상 append 확인.
+
+### 5분봉 라이브 추가
+- config FIVE_MIN_OHLCV_COUNT, scheduler collect_5m(매 5분, :45초 오프셋). 1m과 동급 라이브 수집.
+
+
 
 ### 보관일 전면 상향
 - config.py: OHLCV_PRUNE_DAYS_1M/INTRADAY/DEFAULT 기본값 모두 0(무기한)으로. 외장 2TB 이전 후 전 타임프레임 영구 보존.

@@ -210,6 +210,18 @@ def fetch_ohlcv(ticker='KRW-BTC', interval='minute60', count=200, retry=3, backo
                 if df_api is not None and len(df_api) > 0:
                     # DB 데이터와 병합 (중복 제거)
                     df_api = df_api.reset_index().rename(columns={'index':'time'})
+                    # [버그수정] pyupbit는 tz-naive(KST), DB는 tz-aware(UTC) → 비교 시 TypeError로
+                    # except 폴백되어 신규 봉을 못 붙이던 문제(라이브 최대 2h 지연·구멍). 양쪽 UTC로 정규화.
+                    df_api['time'] = pd.to_datetime(df_api['time'])
+                    if df_api['time'].dt.tz is None:
+                        df_api['time'] = df_api['time'].dt.tz_localize('Asia/Seoul')
+                    df_api['time'] = df_api['time'].dt.tz_convert('UTC')
+                    df_db = df_db.copy()
+                    df_db['time'] = pd.to_datetime(df_db['time'])
+                    if df_db['time'].dt.tz is None:
+                        df_db['time'] = df_db['time'].dt.tz_localize('UTC')
+                    else:
+                        df_db['time'] = df_db['time'].dt.tz_convert('UTC')
                     df_db_latest = df_db['time'].max()
                     df_api_new = df_api[df_api['time'] > df_db_latest]
                     if len(df_api_new) > 0:
