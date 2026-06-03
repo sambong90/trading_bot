@@ -691,7 +691,9 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                     except Exception as e:
                         logger.warning('[오류] %s — PS1 실행 실패: %s', ticker, str(e))
         # DCA: only in trend, loss, volume ok, bull, cooldowns ok, under daily cap
-        if pos > 0 and DCA_ENABLED and regime in DCA_ALLOWED_REGIMES and is_global_bull_market:
+        # 연구 모드(is_new_buy_enabled False)에서는 DCA도 자본 투입이므로 차단.
+        from trading_bot.config import is_new_buy_enabled as _is_nbe_dca
+        if pos > 0 and DCA_ENABLED and regime in DCA_ALLOWED_REGIMES and is_global_bull_market and _is_nbe_dca():
             if (current_roi <= DCA_TRIGGER_ROI_PCT and vol_ratio >= DCA_MIN_VOL_RATIO
                     and not is_in_buy_cooldown(ticker) and not is_in_dca_cooldown(ticker)
                     and count_tag_last_24h(ticker, TAG_DCA_BUY) < DCA_MAX_PER_TICKER_PER_DAY):
@@ -840,6 +842,11 @@ def analyze_ticker(ticker, executor, mode, defer_buy=False, is_global_bull_marke
                 'fib_zone': _fib_zone,
                 'fib_retrace': _fib_retrace,
             }
+        # 연구 모드 방어선(비투패스 직접 진입 경로): 신규 매수 차단 시 실주문 생략.
+        from trading_bot.config import is_new_buy_enabled as _is_nbe_direct
+        if not _is_nbe_direct():
+            logger.info('🔬 [연구모드] %s — 직접 매수 경로 차단(실주문 생략)', ticker)
+            return 'skip', 'RESEARCH_MODE:NEW_BUY_DISABLED', None
         try:
             fill_price_buy = executor.place_order('buy', current_price, size_pct=size_pct, ticker=ticker) or current_price
             try:
@@ -1506,6 +1513,34 @@ def run_cycle(mode):
                     )
                 except Exception:
                     pass
+                continue
+
+            # ── 연구 모드: 신규 매수 차단 (실주문 대신 PAPER_SIGNAL 기록) ──────
+            from trading_bot.config import is_new_buy_enabled as _is_nbe
+            if not _is_nbe():
+                _g_regime = guardian_result.regime if guardian_result else 'UNKNOWN'
+                try:
+                    from trading_bot.ai_logger import log_ai_event as _log_paper
+                    _log_paper(
+                        event_type='PAPER_SIGNAL', ticker=ticker, signal='buy',
+                        price=price, adx=float(item.get('adx', 0) or 0),
+                        regime=_g_regime, timeframe=DEFAULT_INTERVAL,
+                        size_pct=float(size_pct or 0.0),
+                        decision_reason=item.get('reason'),
+                        extra={'strength': float(item.get('max_pattern_strength', 0) or 0),
+                               'fib_zone': item.get('fib_zone', ''),
+                               'estimated_spend': float(item.get('estimated_spend', 0) or 0),
+                               'mode': 'RESEARCH'},
+                    )
+                except Exception:
+                    pass
+                # 60분 중복 방지: PAPER_BUY 쿨다운 마커 → 다음 사이클부터 is_in_buy_cooldown으로 스킵
+                try:
+                    from trading_bot.balanced_plus import log_execution_event as _le_paper, TAG_PAPER_BUY as _tpb
+                    _le_paper(ticker, 'buy', _tpb, price)
+                except Exception:
+                    pass
+                logger.info('🔬 [연구모드] %s — 신규 매수 차단(PAPER_SIGNAL 기록): 가격 %.0f', ticker, price or 0)
                 continue
 
             # ── Phase 4: EM-3 CASH_RULE gate ─────────────────────────────────

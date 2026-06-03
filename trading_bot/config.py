@@ -70,6 +70,26 @@ MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true
 # 4h(minute240) 전 종목 수집 시 종목별 확보 봉 수. load_4h_ema_state는 EMA26+5=31봉 이상 필요.
 FOURH_OHLCV_COUNT = int(os.environ.get('FOURH_OHLCV_COUNT', '100'))
 
+# ── 연구 모드: 신규 매수 차단 (청산/데이터수집은 유지) ──────────────────────
+# 기본 False(매수 중단). enable_auto_live처럼 DB(system_state 'new_buy_enabled')로
+# 재배포 없이 런타임 토글. 우선순위: DB > env NEW_BUY_ENABLED > 기본 False.
+NEW_BUY_ENABLED = os.environ.get('NEW_BUY_ENABLED', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def is_new_buy_enabled() -> bool:
+    """신규 매수 허용 여부. DB system_state 'new_buy_enabled' 우선, 없으면 env, 최종 기본 False.
+
+    매도/청산/DCA-외 데이터수집에는 영향 없음. 이 값이 False면 신규 진입만 차단된다.
+    """
+    try:
+        from trading_bot.risk import get_system_state
+        v = get_system_state('new_buy_enabled', '')
+        if v is not None and str(v).strip() != '':
+            return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
+    except Exception:
+        pass
+    return NEW_BUY_ENABLED
+
 # ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
 # BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.
 DYN_THR_BY_REGIME: dict = {

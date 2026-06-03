@@ -204,6 +204,14 @@ def cmd_status() -> str:
     pause_str = '  ⏸ 정지중' if paused else ''
     lines.append(f'모드: {mode_icon}{pause_str}')
 
+    # 연구 모드(신규 매수 차단) 표시 — 청산/데이터수집은 유지
+    try:
+        from trading_bot.config import is_new_buy_enabled as _is_nbe_st
+        if not _is_nbe_st():
+            lines.append('진입: 🔬 연구 모드 (신규 매수 중단 · 청산/데이터수집 유지)')
+    except Exception:
+        pass
+
     # 마지막 사이클 시각
     try:
         from trading_bot.db import get_session
@@ -1120,6 +1128,15 @@ def send_daily_briefing(chat_id: str = None) -> bool:
     """일일 브리핑 (매일 09:01 KST 스케줄러 호출)."""
     now = _kst_now()
     lines = [f'<b>📅 일일 브리핑</b>  <code>{now.strftime("%Y-%m-%d %H:%M KST")}</code>', '']
+
+    # 연구 모드 안내 (신규 매수 중단 중 — 데이터 수집·페이퍼 신호는 가동)
+    try:
+        from trading_bot.config import is_new_buy_enabled as _is_nbe_brief
+        if not _is_nbe_brief():
+            lines.append('🔬 <b>연구 모드</b> — 신규 매수 중단 중 (청산·데이터 수집·PAPER_SIGNAL 가동)')
+            lines.append('')
+    except Exception:
+        pass
 
     # 전일 성과 요약
     try:

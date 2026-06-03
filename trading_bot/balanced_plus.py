@@ -61,8 +61,11 @@ TAG_CB_SELL = 'CB_SELL'
 TAG_MANUAL_BUY = 'MANUAL_BUY'
 TAG_MANUAL_SELL = 'MANUAL_SELL'
 TAG_ROTATION_SELL = 'ROTATION_SELL'
+TAG_PAPER_BUY = 'PAPER_BUY'  # 연구모드 가상 진입(실주문 없음). 페이퍼 신호 60분 중복 방지용 쿨다운 마커.
 
-_BUY_EXEC_TAGS = (TAG_EXEC_BUY, TAG_DCA_BUY, TAG_MANUAL_BUY)
+# PAPER_BUY 포함: 연구모드에서 페이퍼 신호도 BUY_COOLDOWN으로 시간당 1회만 기록되게 한다.
+# (실매수 승률/스트릭은 orders.sell·exit_reason 기준이라 PAPER_BUY 태그가 성과 통계를 오염시키지 않음.)
+_BUY_EXEC_TAGS = (TAG_EXEC_BUY, TAG_DCA_BUY, TAG_MANUAL_BUY, TAG_PAPER_BUY)
 
 
 def last_buy_ts(ticker: str):

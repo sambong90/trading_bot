@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## 2026-06-03 — 연구 모드: 신규 매수 중단 (청산·데이터수집 유지)
+
+### 목적
+8개 백테스트로 현 1h 추세추종의 구조적 무엣지 확정(REGIME_UNIVERSE_BACKTEST.md 등).
+실거래 신규 매수만 중단하되, 데이터 수집·관측은 유지해 향후 가설 검증 기반 보존.
+"봇 종료"가 아니라 "매매만 끄고 연구 인프라 가동". 환경변수/DB로 재배포 없이 재개 가능.
+
+### 변경 파일
+- config.py: NEW_BUY_ENABLED(env, 기본 False) + is_new_buy_enabled() 헬퍼.
+  우선순위 DB(system_state 'new_buy_enabled') > env > 기본 False. enable_auto_live와 동일 패턴(런타임 토글).
+- balanced_plus.py: TAG_PAPER_BUY 추가 + _BUY_EXEC_TAGS에 포함(페이퍼 신호 60분 중복 방지 쿨다운).
+- tasks/auto_trader.py: 신규 매수 3경로 차단.
+  · Pass2 매수루프: is_new_buy_enabled False면 실주문 대신 PAPER_SIGNAL(ai_events) 기록 + PAPER_BUY 쿨다운 마커 + skip.
+  · DCA 조건에 is_new_buy_enabled() 추가(보유분 추가매수도 자본투입이라 차단).
+  · 비투패스 직접 진입 경로 방어 가드(실주문 생략).
+  매도/청산(HARD_STOP/TRAIL/FIB/스케일아웃)·로테이션 매도는 불변 → 보유분 정상 관리.
+- telegram_bot.py: /status·일일브리핑에 '🔬 연구 모드(신규 매수 중단)' 표시.
+
+### 토글 방법 (재배포 불필요)
+- 매매 재개: system_state 'new_buy_enabled'='1' (예: UPDATE/INSERT) → 다음 사이클부터 매수 재개.
+- 중단 유지: 미설정 또는 '0'(기본). env NEW_BUY_ENABLED=1은 pod 재시작 시 폴백.
+
+### 데이터 수집·청산은 불변 (연구 기반)
+- OHLCV(1h/4h/일봉)·매크로/도미넌스/FNG/BTC주봉 수집, PATTERN_DETECTED·analysis_results 로깅 전부 유지.
+- 청산 로직 미변경 — 보유 포지션은 기존 TRAIL/FIB/HARD_STOP으로 자연 청산.
+
+### 검증
+- py_compile PASS(config/balanced_plus/auto_trader/telegram).
+- 배포 후 확인: PAPER_SIGNAL 기록 여부, 실매수 0건, 데이터 수집 지속, 매도 정상.
+  SELECT count(*), max(ts) FROM ai_events WHERE event='PAPER_SIGNAL';
+- 되돌리기: system_state 'new_buy_enabled'='1' 후 EXECUTE 매수 재개 확인.
+- 참고: 현재 계좌 잔액 ~0(사용자 수동 정리), 거래가능 포지션 0 → 실매수는 자본부족으로도 불가하나
+  게이트는 자본 재투입 시 자동매매 방지용으로 유효.
+
 ## 2026-06-01 — 4h(minute240) 전 종목 수집 확대
 
 ### 목적
