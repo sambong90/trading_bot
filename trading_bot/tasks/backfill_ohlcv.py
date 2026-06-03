@@ -96,6 +96,9 @@ def backfill_one(ticker, tf, sleep_s, max_pages=0):
     session = get_session()
     try:
         to = _oldest_ts(session, ticker, tf)   # None이면 최신부터 시작
+        # DB는 tz-aware(Asia/Seoul), pyupbit는 naive KST → naive(KST 벽시계)로 통일해 비교/포맷.
+        if to is not None:
+            to = to.replace(tzinfo=None)
         pages = 0
         total = 0
         while True:
