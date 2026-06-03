@@ -86,10 +86,11 @@ DAY_OHLCV_COUNT     = int(os.environ.get('DAY_OHLCV_COUNT', '200'))
 WEEK_OHLCV_COUNT    = int(os.environ.get('WEEK_OHLCV_COUNT', '200'))
 MONTH_OHLCV_COUNT   = int(os.environ.get('MONTH_OHLCV_COUNT', '200'))
 # db_maintenance OHLCV 보관일(타임프레임별). 0=무기한 보존.
-# 1분봉 전 종목은 디스크 소모가 커 기본 180일(롤링)로 제한, 저해상도는 무기한 축적.
-OHLCV_PRUNE_DAYS_1M       = int(os.environ.get('OHLCV_PRUNE_DAYS_1M', '180'))
-OHLCV_PRUNE_DAYS_INTRADAY = int(os.environ.get('OHLCV_PRUNE_DAYS_INTRADAY', '365'))  # 15m/30m
-OHLCV_PRUNE_DAYS_DEFAULT  = int(os.environ.get('OHLCV_PRUNE_DAYS_DEFAULT', '0'))     # 60m/240m/day/week/month
+# 외장 2TB 이전(2026-06-03) 후 전 타임프레임 무기한 보존으로 전환 — 최대 데이터 축적.
+# 디스크 압박 시 env로 특정 타임프레임만 롤링 제한 가능(예: OHLCV_PRUNE_DAYS_1M=540).
+OHLCV_PRUNE_DAYS_1M       = int(os.environ.get('OHLCV_PRUNE_DAYS_1M', '0'))
+OHLCV_PRUNE_DAYS_INTRADAY = int(os.environ.get('OHLCV_PRUNE_DAYS_INTRADAY', '0'))  # 15m/30m
+OHLCV_PRUNE_DAYS_DEFAULT  = int(os.environ.get('OHLCV_PRUNE_DAYS_DEFAULT', '0'))   # 60m/240m/day/week/month
 
 # ── 연구 모드: 신규 매수 차단 (청산/데이터수집은 유지) ──────────────────────
 # 기본 False(매수 중단). enable_auto_live처럼 DB(system_state 'new_buy_enabled')로

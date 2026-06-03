@@ -1,6 +1,20 @@
 # CHANGELOG
 
-## 2026-06-03 — DB 외장 2TB SSD 이전 + Phase 5 운영 안정화
+## 2026-06-03 — Phase 6: 최대 데이터 확보 (보관 무기한 + 최대 소급 백필)
+
+### 보관일 전면 상향
+- config.py: OHLCV_PRUNE_DAYS_1M/INTRADAY/DEFAULT 기본값 모두 0(무기한)으로. 외장 2TB 이전 후 전 타임프레임 영구 보존.
+  디스크 압박 시 env로 특정 tf만 롤링 제한 가능(예: OHLCV_PRUNE_DAYS_1M=540). db_maintenance는 0=keep로 이미 처리.
+
+### Upbit 소급 한계 (BTC 프로브)
+- minute1/15/30/60/240/week/month 모두 상장 시점(BTC ~2017-09)까지 제공 확인. 1분봉도 풀 히스토리 가능.
+- day는 프로브 일시 글리치(None)였으나 정상 제공(week/month 2017+ 및 DB 기존 데이터로 확인).
+
+### 백필 스크립트 (tasks/backfill_ohlcv.py)
+- ticker×tf를 DB의 oldest에서 과거로 pyupbit `to` 페이징(200/호출), ON CONFLICT DO NOTHING, 빈 응답이면 상장 한계로 종료.
+- 재실행 시 DB oldest에서 자동 재개(중단복구 안전). 429 지수 백오프. 진행률 로그. tz(KST) 부여, source='upbit-backfill'.
+- 라이브 수집/매매와 독립 실행(별도 프로세스/Job). 점진 확장(1→10→전 종목). sleep 기본 0.3s로 라이브와 rate-limit 합산 여유.
+- 규모: 1분봉 전 종목 풀백필은 누적 수억 봉·수일 소요 → 독립 백그라운드로 진행, 외장 용량 추적 병행.
 
 ### 이전 결과
 - OrbStack VM 디스크(data.img.raw, sparse 15GB)를 외장 APFS SSD(/Volumes/OrbStackSSD)로 이전 후 심볼릭 링크.
