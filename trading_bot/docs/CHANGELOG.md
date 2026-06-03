@@ -1,6 +1,23 @@
 # CHANGELOG
 
-## 2026-06-03 — 연구 모드: 전 종목 × 전 타임프레임 OHLCV 풀 수집
+## 2026-06-03 — DB 외장 2TB SSD 이전 + Phase 5 운영 안정화
+
+### 이전 결과
+- OrbStack VM 디스크(data.img.raw, sparse 15GB)를 외장 APFS SSD(/Volumes/OrbStackSSD)로 이전 후 심볼릭 링크.
+- 1차 시도는 lock_data_image 타임아웃으로 실패 → 원인은 OrbStack에 macOS 전체 디스크 접근(이동식 볼륨) 권한 미부여.
+  FDA 부여 후 정상 부팅. DB 무손실(부팅 백필로 갭 메움). 내장 원본은 data.bak로 보존(수일 후 정리).
+- 외장 결혼식 원본 5.9GB는 재포맷 전 내장 ~/external_rescue/로 md5 검증 복사.
+
+### Phase 5 안정화 (호스트 측, 컨테이너 불변)
+- scripts/host/db_backup.sh: 일 1회(04:30 KST) pg_dump -Fc → ~/db_backups/daily, 일요일 weekly 복제,
+  로테이션(일7/주4), 실패 시 텔레그램 CRITICAL. launchd com.tradingbot.dbbackup.
+- scripts/host/ext_ssd_monitor.sh: 2분마다 /Volumes/OrbStackSSD 마운트 감시, 드롭 시 텔레그램 CRITICAL + orb stop.
+  launchd com.tradingbot.extmonitor.
+- scripts/host/launchd/*.plist: launchd 정의 사본(버전관리용). 인증은 ~/db_backups/.telegram.env(0600, k8s secret 주입).
+- docs/OPERATIONS_EXTERNAL_SSD.md: 부팅/절전 순서, FDA 요구, 물리 안정성, data.bak 정리 시점, 롤백·복구 절차 명문화.
+- 백업은 내장(외장 아님). 클라우드 1부는 rclone 설정 시 자동(현재 미구성, 보완 권장).
+
+
 
 ### 목적
 무엣지 확정 후 신규 전략 설계용 데이터 축적. 매매 중단 상태라 수집 부하가 매매에 영향 없음.
