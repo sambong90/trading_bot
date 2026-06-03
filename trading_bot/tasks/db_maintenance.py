@@ -64,9 +64,28 @@ def prune_old_data():
         ).delete(synchronize_session=False)
         logger.info('prune AnalysisResult: %s rows (30d+ or hold 7d+)', deleted_ar)
 
-        # OHLCV: 90일 초과
-        deleted_ohlcv = session.query(OHLCV).filter(OHLCV.ts < cutoff_90d).delete(synchronize_session=False)
-        logger.info('prune OHLCV: %s rows (older than 90d)', deleted_ohlcv)
+        # OHLCV: 타임프레임별 보관일 (연구용 풀 수집 축적 — 저해상도는 무기한, 1분봉만 롤링)
+        try:
+            from trading_bot.config import (OHLCV_PRUNE_DAYS_1M, OHLCV_PRUNE_DAYS_INTRADAY,
+                                            OHLCV_PRUNE_DAYS_DEFAULT)
+        except Exception:
+            OHLCV_PRUNE_DAYS_1M, OHLCV_PRUNE_DAYS_INTRADAY, OHLCV_PRUNE_DAYS_DEFAULT = 180, 365, 0
+
+        def _prune_ohlcv_tf(tf_list, days):
+            if days <= 0:
+                return 0  # 0=무기한 보존
+            cutoff = now - timedelta(days=days)
+            return session.query(OHLCV).filter(
+                OHLCV.timeframe.in_(tf_list), OHLCV.ts < cutoff
+            ).delete(synchronize_session=False)
+
+        deleted_ohlcv = (
+            _prune_ohlcv_tf(['minute1'], OHLCV_PRUNE_DAYS_1M)
+            + _prune_ohlcv_tf(['minute15', 'minute30'], OHLCV_PRUNE_DAYS_INTRADAY)
+            + _prune_ohlcv_tf(['minute60', 'minute240', 'day', 'week', 'month'], OHLCV_PRUNE_DAYS_DEFAULT)
+        )
+        logger.info('prune OHLCV: %s rows (1m=%sd, 15m/30m=%sd, others=%sd[0=keep])',
+                    deleted_ohlcv, OHLCV_PRUNE_DAYS_1M, OHLCV_PRUNE_DAYS_INTRADAY, OHLCV_PRUNE_DAYS_DEFAULT)
 
         # TechnicalIndicator: 90일 초과
         deleted_tech = session.query(TechnicalIndicator).filter(TechnicalIndicator.ts < cutoff_90d).delete(synchronize_session=False)

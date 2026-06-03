@@ -70,6 +70,27 @@ MTF_4H_ENABLED = os.environ.get('MTF_4H_ENABLED', 'true').lower() in ('1', 'true
 # 4h(minute240) 전 종목 수집 시 종목별 확보 봉 수. load_4h_ema_state는 EMA26+5=31봉 이상 필요.
 FOURH_OHLCV_COUNT = int(os.environ.get('FOURH_OHLCV_COUNT', '100'))
 
+# ── 연구 모드: 전 종목 × 전 타임프레임 OHLCV 풀 수집 ──────────────────────────
+# 매매 무엣지 확정 → 신규 전략 설계용 데이터 축적. 매매 로직 불변, 수집 잡만 추가.
+# 마스터 토글(False면 신규 수집 잡 전부 비활성). 전 종목(top-N 해제) 여부.
+OHLCV_COLLECT_ENABLED = os.environ.get('OHLCV_COLLECT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
+OHLCV_FULL_UNIVERSE = os.environ.get('OHLCV_FULL_UNIVERSE', '1').strip().lower() in ('1', 'true', 'yes', 'on')
+# 종목당 fetch 사이 sleep(초). 262종목 × 0.15 ≈ 40초/패스, Upbit quotation 10req/s 여유.
+COLLECT_SLEEP_SEC = float(os.environ.get('COLLECT_SLEEP_SEC', '0.15'))
+# 타임프레임별 종목당 확보 봉 수(pyupbit 단일 호출 최대 200).
+ONE_MIN_OHLCV_COUNT = int(os.environ.get('ONE_MIN_OHLCV_COUNT', '200'))
+M15_OHLCV_COUNT     = int(os.environ.get('M15_OHLCV_COUNT', '200'))
+M30_OHLCV_COUNT     = int(os.environ.get('M30_OHLCV_COUNT', '200'))
+H1_FULL_OHLCV_COUNT = int(os.environ.get('H1_FULL_OHLCV_COUNT', '200'))
+DAY_OHLCV_COUNT     = int(os.environ.get('DAY_OHLCV_COUNT', '200'))
+WEEK_OHLCV_COUNT    = int(os.environ.get('WEEK_OHLCV_COUNT', '200'))
+MONTH_OHLCV_COUNT   = int(os.environ.get('MONTH_OHLCV_COUNT', '200'))
+# db_maintenance OHLCV 보관일(타임프레임별). 0=무기한 보존.
+# 1분봉 전 종목은 디스크 소모가 커 기본 180일(롤링)로 제한, 저해상도는 무기한 축적.
+OHLCV_PRUNE_DAYS_1M       = int(os.environ.get('OHLCV_PRUNE_DAYS_1M', '180'))
+OHLCV_PRUNE_DAYS_INTRADAY = int(os.environ.get('OHLCV_PRUNE_DAYS_INTRADAY', '365'))  # 15m/30m
+OHLCV_PRUNE_DAYS_DEFAULT  = int(os.environ.get('OHLCV_PRUNE_DAYS_DEFAULT', '0'))     # 60m/240m/day/week/month
+
 # ── 연구 모드: 신규 매수 차단 (청산/데이터수집은 유지) ──────────────────────
 # 기본 False(매수 중단). enable_auto_live처럼 DB(system_state 'new_buy_enabled')로
 # 재배포 없이 런타임 토글. 우선순위: DB > env NEW_BUY_ENABLED > 기본 False.

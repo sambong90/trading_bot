@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## 2026-06-03 — 연구 모드: 전 종목 × 전 타임프레임 OHLCV 풀 수집
+
+### 목적
+무엣지 확정 후 신규 전략 설계용 데이터 축적. 매매 중단 상태라 수집 부하가 매매에 영향 없음.
+기존 수집은 top-60(거래대금) + 1h/4h/day만 → 신규는 거래 가능 KRW 전 종목(262개) ×
+1m/15m/30m/1h/4h/day/week/month 전 타임프레임. 매매·청산 로직 불변, 수집 잡만 추가.
+
+### 종목 커버리지 진단
+- Upbit KRW 거래 가능: 262종목. 기존 ohlcv 누적 distinct: 232종목(1h=227, day=227, 4h=94).
+- 누락 ~30종목은 3개월간 top-N 밖이라 미수집 → 풀 수집으로 전 종목 커버.
+- DB 디스크: PVC 명목 4Gi(local-path 미강제) 실제 노드 디스크 127GB 중 115GB free. ohlcv 현 92MB.
+
+### 변경 파일
+- config.py: OHLCV_COLLECT_ENABLED/OHLCV_FULL_UNIVERSE 토글, 타임프레임별 봉 수(ONE_MIN_OHLCV_COUNT 등),
+  COLLECT_SLEEP_SEC, 타임프레임별 보관일(OHLCV_PRUNE_DAYS_1M=180/INTRADAY=365/DEFAULT=0=무기한).
+- data.py: get_all_krw_tickers_full() 추가 — top-N 절단 없이 거래 가능 KRW 전 종목 반환(스테이블·known_delisted 제거).
+- tasks/scheduler_service.py: _collect_ohlcv_bulk(interval,count) 공통 루틴 + 잡 등록.
+  · 1m 5분마다(최근200봉 묶음, 매분 호출 대비 1/5), 15m/30m 봉마감+오프셋, 1h 전종목 보완(매시 03분),
+    day/week/month 1일 1회. 부팅 +60~600초 시차 백필 7종. collect_4h_ohlcv도 전 종목으로 전환.
+  · _check_disk_capacity: 6시간마다 디스크 사용률 점검, 80% 초과 시 텔레그램 알림(안전판).
+- tasks/db_maintenance.py: OHLCV 보관을 타임프레임별로 분리. 1분봉만 180일 롤링, 15m/30m 365일,
+  1h/4h/day/week/month 무기한 보존(기존 일괄 90일 삭제 → 저해상도 장기 축적 가능).
+
+### 용량·rate-limit
+- 1분봉 전 종목 ≈ 298MB/일(792B/row 실측), 180일 plateau ≈ 54GB. 15m/30m 365일 ≈ 11GB. 저해상도 ~2GB/년.
+  총 plateau ≈ 65GB < free 115GB. 80% 알림이 가드레일.
+- Upbit quotation 10req/s·600req/min. 1m 262종목을 종목당 sleep+내부지연으로 ~2분 분산 → <3req/s. 매매 사이클과 합산도 한도 내.
+
+
 ## 2026-06-03 — 연구 모드: 신규 매수 중단 (청산·데이터수집 유지)
 
 ### 목적

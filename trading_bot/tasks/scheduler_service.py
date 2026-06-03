@@ -475,9 +475,10 @@ def collect_4h_ohlcv() -> None:
     """
     _log('[수집] collect_4h_ohlcv 실행')
     try:
-        from trading_bot.data import get_all_krw_tickers, fetch_ohlcv
-        from trading_bot.config import FOURH_OHLCV_COUNT
-        tickers = get_all_krw_tickers(use_db_fallback=True)
+        from trading_bot.data import get_all_krw_tickers, get_all_krw_tickers_full, fetch_ohlcv
+        from trading_bot.config import FOURH_OHLCV_COUNT, OHLCV_FULL_UNIVERSE
+        tickers = (get_all_krw_tickers_full(use_db_fallback=True)
+                   if OHLCV_FULL_UNIVERSE else get_all_krw_tickers(use_db_fallback=True))
         ok = 0
         fail = 0
         for _t in tickers:
@@ -498,6 +499,64 @@ def collect_4h_ohlcv() -> None:
     except Exception as e:
         _log(f'[수집] collect_4h_ohlcv 예외: {e}', 'error')
         _notify_scheduler(f'[collect_4h_ohlcv] 오류: {e}')
+
+
+def _collect_ohlcv_bulk(interval: str, count: int, label: str) -> None:
+    """전 종목 OHLCV 단일 타임프레임 수집·DB 적재 (연구용 풀 수집 공통 루틴).
+
+    fetch_ohlcv(use_db_first=True)가 DB 신선 시 최근 50봉만 API로 받아 병합하므로
+    호출당 API 부하가 낮다. ON CONFLICT DO NOTHING으로 중복 무시. 매매 로직 불변.
+    OHLCV_FULL_UNIVERSE=True면 거래 가능 KRW 전 종목, False면 거래대금 top-N.
+    """
+    try:
+        from trading_bot.config import OHLCV_COLLECT_ENABLED, OHLCV_FULL_UNIVERSE, COLLECT_SLEEP_SEC
+    except Exception:
+        OHLCV_COLLECT_ENABLED, OHLCV_FULL_UNIVERSE, COLLECT_SLEEP_SEC = True, True, 0.15
+    if not OHLCV_COLLECT_ENABLED:
+        return
+    _log(f'[수집] collect_ohlcv[{label}] 실행')
+    try:
+        from trading_bot.data import (get_all_krw_tickers, get_all_krw_tickers_full,
+                                      fetch_ohlcv)
+        tickers = (get_all_krw_tickers_full(use_db_fallback=True)
+                   if OHLCV_FULL_UNIVERSE else get_all_krw_tickers(use_db_fallback=True))
+        ok = 0
+        fail = 0
+        for _t in tickers:
+            try:
+                df = fetch_ohlcv(ticker=_t, interval=interval, count=count, use_db_first=True)
+                if df is not None and len(df) > 0:
+                    ok += 1
+                else:
+                    fail += 1
+            except Exception as _e:
+                fail += 1
+                _log(f'[수집] collect_ohlcv[{label}] {_t} 실패: {_e}', 'warning')
+            time.sleep(COLLECT_SLEEP_SEC)
+        _log(f'[수집] collect_ohlcv[{label}] 완료 — 성공 {ok} / 실패 {fail} / 대상 {len(tickers)}')
+        if tickers and ok == 0:
+            _notify_scheduler(f'⚠️ [OHLCV {label}] 전 종목 수집 실패')
+    except Exception as e:
+        _log(f'[수집] collect_ohlcv[{label}] 예외: {e}', 'error')
+        _notify_scheduler(f'[collect_ohlcv {label}] 오류: {e}')
+
+
+def _check_disk_capacity() -> None:
+    """OHLCV 풀 수집 안전판: DB 데이터 디스크 사용률 80% 초과 시 1회 알림.
+
+    1분봉 전 종목 누적은 디스크 소모가 크므로 임계 도달 시 보관일(env) 하향 유도.
+    """
+    try:
+        import shutil
+        total, used, free = shutil.disk_usage('/')
+        pct = used / total * 100 if total else 0
+        _log(f'[용량] 디스크 사용률 {pct:.1f}% (free {free/1e9:.1f}GB / total {total/1e9:.1f}GB)')
+        if pct >= 80:
+            _notify_scheduler(
+                f'⚠️ [용량] 디스크 사용률 {pct:.0f}% — OHLCV 보관일(OHLCV_PRUNE_DAYS_1M 등) 하향 검토'
+            )
+    except Exception as e:
+        _log(f'[용량] 디스크 체크 실패: {e}', 'warning')
 
 
 def run_db_maintenance() -> None:
@@ -673,6 +732,65 @@ sched.add_job(collect_4h_ohlcv, 'date',
               run_date=datetime.now() + timedelta(seconds=45),
               id='collect_4h_ohlcv_initial', misfire_grace_time=600)
 _log('4h OHLCV 초기 백필 1회 예약 (부팅 +45초)')
+
+# ── 연구 모드: 전 종목 × 전 타임프레임 OHLCV 풀 수집 ─────────────────────────
+# 매매 무엣지 확정 후 신규 전략 설계용 데이터 축적. 매매/청산 사이클과 독립 실행.
+if os.environ.get('OHLCV_COLLECT_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on'):
+    from trading_bot.config import (ONE_MIN_OHLCV_COUNT, M15_OHLCV_COUNT, M30_OHLCV_COUNT,
+                                    H1_FULL_OHLCV_COUNT, DAY_OHLCV_COUNT, WEEK_OHLCV_COUNT,
+                                    MONTH_OHLCV_COUNT)
+
+    # 1분봉: 5분마다 최근 N봉 묶음 수집 (매분 호출 대비 API 1/5). 정시 충돌 회피 위해 +30초.
+    sched.add_job(lambda: _collect_ohlcv_bulk('minute1', ONE_MIN_OHLCV_COUNT, '1m'),
+                  'cron', minute='*/5', second=30, id='collect_1m',
+                  max_instances=1, misfire_grace_time=240)
+    _log('1분봉 전 종목 수집 스케줄 등록 (5분마다 — 매매 사이클과 독립)')
+
+    # 15분봉: 15분봉 마감 직후(+2분). 30분봉: 30분봉 마감 직후(+3분).
+    sched.add_job(lambda: _collect_ohlcv_bulk('minute15', M15_OHLCV_COUNT, '15m'),
+                  'cron', minute='2,17,32,47', id='collect_15m',
+                  max_instances=1, misfire_grace_time=300)
+    sched.add_job(lambda: _collect_ohlcv_bulk('minute30', M30_OHLCV_COUNT, '30m'),
+                  'cron', minute='3,33', id='collect_30m',
+                  max_instances=1, misfire_grace_time=300)
+    _log('15m/30m 전 종목 수집 스케줄 등록')
+
+    # 1시간봉 전 종목 보완: 매매 사이클은 top-60만 커버 → 나머지 종목을 매시 +3분에 채움.
+    sched.add_job(lambda: _collect_ohlcv_bulk('minute60', H1_FULL_OHLCV_COUNT, '1h_full'),
+                  'cron', minute=3, id='collect_60m_full',
+                  max_instances=1, misfire_grace_time=300)
+    _log('1h 전 종목 보완 수집 스케줄 등록 (매시 03분)')
+
+    # 일/주/월봉: 1일 1회 (일봉 마감 09:00 KST 직후). 주·월봉은 단일 호출로 장기 백필.
+    sched.add_job(lambda: _collect_ohlcv_bulk('day', DAY_OHLCV_COUNT, 'day'),
+                  'cron', hour=9, minute=10, id='collect_day_full', misfire_grace_time=600)
+    sched.add_job(lambda: _collect_ohlcv_bulk('week', WEEK_OHLCV_COUNT, 'week'),
+                  'cron', hour=8, minute=12, id='collect_week', misfire_grace_time=600)
+    sched.add_job(lambda: _collect_ohlcv_bulk('month', MONTH_OHLCV_COUNT, 'month'),
+                  'cron', hour=8, minute=14, id='collect_month', misfire_grace_time=600)
+    _log('일/주/월봉 전 종목 수집 스케줄 등록 (1일 1회)')
+
+    # 디스크 용량 안전판: 6시간마다 사용률 점검, 80% 초과 시 알림.
+    sched.add_job(_check_disk_capacity, 'interval', hours=6, id='disk_capacity',
+                  misfire_grace_time=600)
+
+    # 부팅 직후 단계적 백필(정시 충돌·rate-limit 분산 위해 시차 배치).
+    for _delay, _iv, _cnt, _lb in (
+        (60, 'day', DAY_OHLCV_COUNT, 'day'),
+        (120, 'week', WEEK_OHLCV_COUNT, 'week'),
+        (180, 'month', MONTH_OHLCV_COUNT, 'month'),
+        (240, 'minute30', M30_OHLCV_COUNT, '30m'),
+        (360, 'minute15', M15_OHLCV_COUNT, '15m'),
+        (480, 'minute60', H1_FULL_OHLCV_COUNT, '1h_full'),
+        (600, 'minute1', ONE_MIN_OHLCV_COUNT, '1m'),
+    ):
+        sched.add_job(
+            (lambda iv, cnt, lb: (lambda: _collect_ohlcv_bulk(iv, cnt, lb)))(_iv, _cnt, _lb),
+            'date', run_date=datetime.now() + timedelta(seconds=_delay),
+            id=f'collect_{_lb}_initial', misfire_grace_time=900)
+    _log('OHLCV 풀 수집 초기 백필 7종 예약 (부팅 +60~600초 시차)')
+else:
+    _log('OHLCV 풀 수집 비활성 (OHLCV_COLLECT_ENABLED=1로 활성화)')
 
 # ── 기존 유지보수 Job ────────────────────────────────────────────────────────
 

@@ -97,6 +97,35 @@ def get_all_krw_tickers(use_db_fallback=True):
     return ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL']
 
 
+def get_all_krw_tickers_full(use_db_fallback=True):
+    """KRW 마켓 거래 가능 전 종목 반환 (top-N 절단 없음). 연구용 풀 수집 대상.
+    - env TICKERS 있으면 우선 사용.
+    - 없으면 업비트 전체 KRW 티커(스테이블·known_delisted 제거) 그대로 반환.
+    - API 실패 시 DB ohlcv distinct 티커 폴백, 최종 폴백 기본 4종목.
+    """
+    import os
+    env_tickers = os.environ.get('TICKERS', '').strip()
+    if env_tickers:
+        return [t.strip() for t in env_tickers.split(',') if t.strip().startswith('KRW-')]
+    try:
+        all_krw = pyupbit.get_tickers(fiat='KRW')
+        if all_krw:
+            return _filter_tickers([t for t in all_krw if t.startswith('KRW-')])
+    except Exception:
+        pass
+    if use_db_fallback:
+        try:
+            session = get_session()
+            rows = session.query(OHLCV.ticker).distinct().all()
+            session.close()
+            tickers = [r[0] for r in rows if r[0] and r[0].startswith('KRW-')]
+            if tickers:
+                return _filter_tickers(sorted(set(tickers)))
+        except Exception:
+            pass
+    return ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL']
+
+
 def fetch_ohlcv_from_db(ticker='KRW-BTC', interval='minute60', count=200):
     """
     DB에서 OHLCV 데이터 가져오기 (과거 데이터 포함)
