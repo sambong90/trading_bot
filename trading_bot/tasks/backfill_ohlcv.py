@@ -21,7 +21,7 @@ import sys
 import time
 import argparse
 import pathlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -57,6 +57,7 @@ _UPBIT_PATH = {
     'minute240': ('minutes', 240), 'day': ('days', None), 'week': ('weeks', None), 'month': ('months', None),
 }
 _EMPTY_DF = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+_KST = timezone(timedelta(hours=9))
 
 
 def _to_df(data):
@@ -137,16 +138,19 @@ def backfill_one(ticker, tf, sleep_s, max_pages=0):
     """ticker×tf를 DB oldest에서 상장 한계까지 과거로 페이징 적재. (시도행, 페이지수, oldest)"""
     session = get_session()
     try:
-        to = _oldest_ts(session, ticker, tf)   # None이면 최신부터 시작
-        # DB는 tz-aware(Asia/Seoul), pyupbit는 naive KST → naive(KST 벽시계)로 통일해 비교/포맷.
+        to = _oldest_ts(session, ticker, tf)   # tz-aware(보통 KST) 또는 None
+        # KST 벽시계(naive)로 통일. Upbit `to`는 offset 없으면 UTC로 해석되므로
+        # 호출 시 '+09:00'을 붙여 9h 어긋남을 막는다(이게 빠지면 과거로 안 가고 1페이지서 멈춤).
         if to is not None:
-            to = to.replace(tzinfo=None)
+            if to.tzinfo is None:
+                to = to.replace(tzinfo=_KST)
+            to = to.astimezone(_KST).replace(tzinfo=None)
         pages = 0
         total = 0
         while True:
             if max_pages and pages >= max_pages:
                 break
-            to_str = to.strftime('%Y-%m-%d %H:%M:%S') if to is not None else None
+            to_str = to.strftime('%Y-%m-%dT%H:%M:%S+09:00') if to is not None else None
             df = _fetch_with_backoff(ticker, tf, to_str, sleep_s)
             if df is None or len(df) == 0:
                 break  # 상장 한계(더 과거 없음)

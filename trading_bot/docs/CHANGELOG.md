@@ -8,8 +8,8 @@
 ### 수정 (tasks/backfill_ohlcv.py)
 - _fetch_with_backoff를 raw Upbit 호출로 교체. status code로 구분: 429=끈질긴 백오프 재시도(최대 60회), 200+빈배열=진짜 상장 한계로 즉시 종료(재시도 낭비 없음). _to_df로 candle_date_time_kst 파싱(pyupbit와 동일 KST-naive 인덱스).
 - 효과: 라이브와 경합해도 1분봉이 상장까지 완주. 재실행 시 DB oldest부터 자동 재개라 기존 조기종료 종목도 이어서 채움.
-
-# CHANGELOG
+- 후속 수정: raw `to`는 offset 없으면 Upbit가 UTC로 해석해 9h 어긋나 과거로 안 가고 1페이지서 멈춤 → `to`를 KST(+09:00) offset으로 전송하도록 backfill_one 수정. _KST 상수 추가.
+- 운영: GitHub Actions self-hosted 러너를 launchd 서비스로 등록(svc.sh install/start) → 재부팅/정전 후 자동 기동(빌드 큐 멈춤 방지).
 
 ## 2026-06-03 — 라이브 수집 tz 병합 버그 수정 + 5분봉 라이브 추가
 
