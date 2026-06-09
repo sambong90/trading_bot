@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-06-09 — 백필 429 조기종료 버그 수정 (raw Upbit API)
+
+### 문제
+1분봉 백필이 라이브 수집과 rate-limit 경합 시 종목당 몇 페이지만 받고 끊김(예: BORA 상장 2020-08인데 1m이 2026-06에서 멈춤). 원인: pyupbit가 429(레이트리밋)와 "데이터 없음(상장 한계)"을 둘 다 None으로 반환 → 백필이 429를 끝으로 오인.
+
+### 수정 (tasks/backfill_ohlcv.py)
+- _fetch_with_backoff를 raw Upbit 호출로 교체. status code로 구분: 429=끈질긴 백오프 재시도(최대 60회), 200+빈배열=진짜 상장 한계로 즉시 종료(재시도 낭비 없음). _to_df로 candle_date_time_kst 파싱(pyupbit와 동일 KST-naive 인덱스).
+- 효과: 라이브와 경합해도 1분봉이 상장까지 완주. 재실행 시 DB oldest부터 자동 재개라 기존 조기종료 종목도 이어서 채움.
+
+# CHANGELOG
+
 ## 2026-06-03 — 라이브 수집 tz 병합 버그 수정 + 5분봉 라이브 추가
 
 ### data.py fetch_ohlcv 병합 버그 (라이브 최대 2h 지연·구멍 원인)

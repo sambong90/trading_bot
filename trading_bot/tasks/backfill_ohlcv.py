@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import pyupbit
+import requests
 import pandas as pd
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -49,23 +50,60 @@ def _oldest_ts(session, ticker, tf):
     ).scalar()
 
 
-def _fetch_with_backoff(ticker, tf, to_str, sleep_s, retries=8):
-    """pyupbit 호출 + 백오프. pyupbit는 429(레이트리밋)에 예외 대신 None을 반환하므로
-    None/빈응답도 재시도 대상으로 처리(과거 데이터가 남아있는데 조기 종료되는 것 방지).
-    retries회 모두 None이면 진짜 한계(상장)이거나 지속 실패로 보고 None 반환."""
+# Upbit 캔들 엔드포인트 경로 (tf -> (path, unit)). pyupbit와 동일 결과를 raw로 받기 위함.
+_UPBIT_PATH = {
+    'minute1': ('minutes', 1), 'minute3': ('minutes', 3), 'minute5': ('minutes', 5),
+    'minute15': ('minutes', 15), 'minute30': ('minutes', 30), 'minute60': ('minutes', 60),
+    'minute240': ('minutes', 240), 'day': ('days', None), 'week': ('weeks', None), 'month': ('months', None),
+}
+_EMPTY_DF = pd.DataFrame(columns=['open', 'high', 'low', 'close', 'volume'])
+
+
+def _to_df(data):
+    """Upbit 캔들 JSON 리스트 → pyupbit와 동일 형식(index=KST naive, OHLCV)."""
+    df = pd.DataFrame(data)
+    df['time'] = pd.to_datetime(df['candle_date_time_kst'])  # naive KST (pyupbit 인덱스와 동일)
+    df = df.rename(columns={'opening_price': 'open', 'high_price': 'high', 'low_price': 'low',
+                            'trade_price': 'close', 'candle_acc_trade_volume': 'volume'})
+    return df.set_index('time').sort_index()[['open', 'high', 'low', 'close', 'volume']]
+
+
+def _fetch_with_backoff(ticker, tf, to_str, sleep_s, retries=60):
+    """raw Upbit 호출. pyupbit가 429/빈응답을 모두 None으로 줘 '끝'으로 오인하던 문제를
+    status code로 해결: 429는 끈질기게 백오프 재시도, 200+빈배열만 진짜 상장 한계로 종료.
+    반환: DataFrame(데이터) / 빈DF(상장 한계) / None(재시도 소진=지속 차단, 재개로 이어감)."""
+    path = _UPBIT_PATH.get(tf)
+    if path is None:  # 미지원 tf는 pyupbit 폴백
+        try:
+            df = pyupbit.get_ohlcv(ticker, interval=tf, to=to_str, count=200)
+            return df if df is not None else _EMPTY_DF
+        except Exception:
+            return None
+    unit, n = path
+    url = f"https://api.upbit.com/v1/candles/{unit}" + (f"/{n}" if n else "")
+    params = {'market': ticker, 'count': 200}
+    if to_str:
+        params['to'] = to_str
     delay = max(sleep_s, 0.3)
     for _ in range(retries):
         try:
-            df = pyupbit.get_ohlcv(ticker, interval=tf, to=to_str, count=200)
-            if df is not None and len(df) > 0:
-                return df
-            # None/빈응답 = 레이트리밋 가능 → 백오프 후 재시도
-            time.sleep(delay * 3)
-            delay = min(delay * 1.5, 10)
-        except Exception as e:
-            s = str(e).lower()
-            time.sleep(delay * (4 if ('429' in s or 'too many' in s or 'rate' in s) else 2))
-            delay = min(delay * 2, 20)
+            r = requests.get(url, params=params, timeout=10)
+        except Exception:
+            time.sleep(min(delay * 2, 10)); delay = min(delay * 1.5, 10); continue
+        if r.status_code == 200:
+            try:
+                data = r.json()
+            except Exception:
+                return None
+            if not data:
+                return _EMPTY_DF  # 200+빈배열 = 더 과거 없음(상장 한계)
+            try:
+                return _to_df(data)
+            except Exception:
+                return None
+        if r.status_code == 429:  # 레이트리밋 → 끈질기게 재시도
+            time.sleep(min(delay, 5)); delay = min(delay * 1.2, 5); continue
+        time.sleep(min(delay * 2, 10)); delay = min(delay * 1.5, 10); continue  # 5xx 등
     return None
 
 
