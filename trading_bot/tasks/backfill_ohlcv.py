@@ -9,12 +9,18 @@
   python -m trading_bot.tasks.backfill_ohlcv --tickers KRW-BTC --timeframes day,minute60
   python -m trading_bot.tasks.backfill_ohlcv --tickers all --timeframes all --sleep 0.3
   python -m trading_bot.tasks.backfill_ohlcv --tickers KRW-BTC --timeframes minute1 --max-pages 20  # 테스트
+  # 중간 공백 채우기(구간 지정): oldest 대신 --to에서 과거로 내려가며 --from에서 멈춤
+  python -m trading_bot.tasks.backfill_ohlcv --tickers KRW-NEO --timeframes minute60 --from 2026-03-01 --to 2026-05-27
 
 옵션:
   --tickers     'all' 또는 쉼표구분(KRW-...). 기본 all(거래가능 KRW 전 종목).
   --timeframes  'all' 또는 쉼표구분. 기본 all(cheap→expensive 순).
   --sleep       호출 간 sleep 초. 기본 0.3 (라이브 수집과 합산 rate-limit 여유).
   --max-pages   tf당 최대 페이지(테스트/제한용). 0=무제한(상장까지). 기본 0.
+  --from        역수집 하한(YYYY-MM-DD, KST). 페이지 oldest가 이 시각 이하가 되면 종료.
+                지정 시 DB oldest보다 최신에 있는 '중간 공백'을 채우는 용도(기본 None=상장한계까지).
+  --to          역수집 시작 상한(YYYY-MM-DD, KST). DB oldest 대신 이 시각부터 과거로 페이징
+                (기본 None=DB oldest부터). --from과 함께 [from, to] 구간만 채움.
 """
 import os
 import sys
@@ -134,11 +140,14 @@ def _insert(session, ticker, tf, df):
     return len(recs)
 
 
-def backfill_one(ticker, tf, sleep_s, max_pages=0):
-    """ticker×tf를 DB oldest에서 상장 한계까지 과거로 페이징 적재. (시도행, 페이지수, oldest)"""
+def backfill_one(ticker, tf, sleep_s, max_pages=0, from_dt=None, to_dt=None):
+    """ticker×tf를 DB oldest(또는 to_dt)에서 상장 한계(또는 from_dt)까지 과거로 페이징 적재.
+    from_dt/to_dt 미지정 시 기존 동작과 100% 동일(oldest→상장한계).
+    (시도행, 페이지수, oldest) 반환."""
     session = get_session()
     try:
-        to = _oldest_ts(session, ticker, tf)   # tz-aware(보통 KST) 또는 None
+        # 시작 상한: --to 지정 시 그 시각부터, 아니면 DB의 현재 oldest에서.
+        to = to_dt if to_dt is not None else _oldest_ts(session, ticker, tf)
         # KST 벽시계(naive)로 통일. Upbit `to`는 offset 없으면 UTC로 해석되므로
         # 호출 시 '+09:00'을 붙여 9h 어긋남을 막는다(이게 빠지면 과거로 안 가고 1페이지서 멈춤).
         if to is not None:
@@ -160,6 +169,9 @@ def backfill_one(ticker, tf, sleep_s, max_pages=0):
             # 진행 없음(같은/더 최신만 반환) → 한계 도달로 종료(무한루프 방지)
             if to is not None and new_oldest >= to:
                 break
+            # 구간 하한 도달 → 종료(중간 공백 채우기: from_dt 이하로는 더 안 내려감)
+            if from_dt is not None and new_oldest <= from_dt:
+                break
             to = new_oldest
             time.sleep(sleep_s)
         final_oldest = _oldest_ts(session, ticker, tf)
@@ -174,7 +186,14 @@ def main():
     ap.add_argument('--timeframes', default='all')
     ap.add_argument('--sleep', type=float, default=0.3)
     ap.add_argument('--max-pages', type=int, default=0)
+    ap.add_argument('--from', dest='from_date', default=None,
+                    help='역수집 하한(YYYY-MM-DD, KST). oldest가 이 시각 이하면 종료(중간 공백용).')
+    ap.add_argument('--to', dest='to_date', default=None,
+                    help='역수집 시작 상한(YYYY-MM-DD, KST). DB oldest 대신 이 시각부터 과거로.')
     args = ap.parse_args()
+
+    from_dt = datetime.strptime(args.from_date, '%Y-%m-%d') if args.from_date else None
+    to_dt = datetime.strptime(args.to_date, '%Y-%m-%d') if args.to_date else None
 
     if args.tickers.strip().lower() == 'all':
         tickers = get_all_krw_tickers_full(use_db_fallback=True)
@@ -183,12 +202,15 @@ def main():
     tfs = TF_ALL if args.timeframes.strip().lower() == 'all' else \
         [x.strip() for x in args.timeframes.split(',') if x.strip()]
 
-    _log(f"start: {len(tickers)} tickers × {len(tfs)} tf, sleep={args.sleep}s, max_pages={args.max_pages or '∞'}")
+    rng = ''
+    if from_dt is not None or to_dt is not None:
+        rng = f", range=[{args.from_date or '상장'}..{args.to_date or 'oldest'}]"
+    _log(f"start: {len(tickers)} tickers × {len(tfs)} tf, sleep={args.sleep}s, max_pages={args.max_pages or '∞'}{rng}")
     grand = 0
     for i, tk in enumerate(tickers, 1):
         for tf in tfs:
             try:
-                n, p, oldest = backfill_one(tk, tf, args.sleep, args.max_pages)
+                n, p, oldest = backfill_one(tk, tf, args.sleep, args.max_pages, from_dt=from_dt, to_dt=to_dt)
                 grand += n
                 _log(f"[{i}/{len(tickers)}] {tk} {tf}: +{n} rows, {p} pages, oldest={str(oldest)[:19]} (누적 {grand})")
             except Exception as e:
