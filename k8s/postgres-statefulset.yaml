@@ -27,6 +27,18 @@ spec:
         - name: postgres
           image: postgres:16-alpine
 
+          # ── PG 서버 파라미터 (컨테이너 4Gi/2CPU에 맞춰 조정) ───────────────
+          # postgres 엔트리포인트는 '-'로 시작하는 args 앞에 'postgres'를 자동 prepend.
+          args:
+            - -c
+            - shared_buffers=1536MB
+            - -c
+            - effective_cache_size=3GB
+            - -c
+            - maintenance_work_mem=512MB
+            - -c
+            - work_mem=8MB
+
           # ── 환경 변수: Secret에서 주입 ─────────────────────────────────
           env:
             - name: POSTGRES_USER
@@ -63,14 +75,16 @@ spec:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
 
-          # ── 리소스 ───────────────────────────────────────────────────────
+          # ── 리소스 (2026-06-14 증설: 512Mi/0.5CPU → 4Gi/2CPU) ─────────────
+          # 84GB·303M행 DB + 라이브 봇 부하에 512Mi/0.5CPU가 과소(bigint 마이그레이션
+          # 1h21m·OOM 크래시 유발, 평시 쿼리 starve). VM 7.8Gi/10CPU 내 봇(1Gi)과 공존.
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1536Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
 
           # ── Readiness Probe ───────────────────────────────────────────────
           # sh -c 로 감싸야 $POSTGRES_USER 환경변수가 실제로 치환됨.
