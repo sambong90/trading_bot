@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-06-12 — 연구 워크스테이션(데스크톱) DB 덤프 동기화 (SSH/scp push)
+
+### SSH 양방향 (맥미니 호스트, 라이브 봇 무관)
+- 맥미니 원격 로그인(sshd:22) 이미 ON 확인(OrbStack은 32222라 충돌 없음). 외부 노출 안 함, LAN 한정.
+- 데스크톱(DESKTOP-6PSHH68, 192.168.123.111) 공개키를 ~/.ssh/authorized_keys 등록. ~/.ssh 700, authorized_keys 600.
+- 맥미니 키쌍 생성: ~/.ssh/id_ed25519 (sambong.ai@macmini-livebot). ~/.ssh/config 에 Host desktop 별칭 추가(IdentitiesOnly, accept-new, ConnectTimeout 10).
+- 남은 수동 1단계: 맥미니 공개키를 데스크톱 관리자 PowerShell로 C:\ProgramData\ssh\administrators_authorized_keys 에 등록해야 mac->desktop scp 인증 완료(jbh=관리자라 사용자 authorized_keys는 무시됨).
+
+### 백업 덤프 자동 전송 (scripts/host/db_backup.sh)
+- pg_dump -Fc 성공 후 최신 덤프 1부를 desktop:db_sync/incoming/ 로 scp push 단계 추가. BatchMode/ConnectTimeout으로 멈춤 방지.
+- 데스크톱 off면 실패 무시(로컬백업 보존, 다음 기동 때 따라잡음). .push_fail_count로 연속 실패 카운트, 3일 연속 실패 시 텔레그램 경고.
+- 데스크톱->맥 라이브 DB 직접 접속 금지(덤프 단방향 push만). 라이브 봇/DB 로직 미변경, postgres-0/trading-bot Running 무영향 확인.
+
 ## 2026-06-09 — 백필 429 조기종료 버그 수정 (raw Upbit API)
 
 ### 문제
