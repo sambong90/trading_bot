@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 2026-06-15 — 데스크톱 개발 클론 구성 (dev=데스크톱, 맥미니=배포대상)
+
+- 데스크톱(WSL) deploy key(github_deploy, write) 등록 → `~/work/trading_bot` 클론.
+- 코드 수정·커밋·push는 데스크톱에서. push→GHA 빌드→맥미니 self-hosted runner가 trading-bot rollout(자동).
+- 맥미니 `~/.openclaw/workspace`는 배포 산출물 위치(직접 수정 안 함). param_manager.py stash(ADX 25→20)는 맥미니 로컬 보존(미push).
+
+
 ## 2026-06-12 — 연구 워크스테이션(데스크톱) DB 덤프 동기화 (SSH/scp push)
 
 ### SSH 양방향 (맥미니 호스트, 라이브 봇 무관)
