@@ -31,6 +31,7 @@
 
 ## 배포
 git push만. GHA가 빌드-GHCR-rollout 자동 처리. gh run view로 확인.
+맥 호스트 스크립트(scripts/host/db_backup.sh, launchd plist 등)는 맥 워크스페이스 체크아웃에서 직접 실행. 봇 코드와 달리 이미지 배포로 안 바뀜. 데스크톱서 수정-push 후 맥 워크스페이스에서 git pull 해야 반영. 이 pull은 동기화이지 직접수정 금지 규칙과 무관.
 
 ## 참조 문서
 - docs/CODING_STANDARDS.md: 네이밍, 에러 처리, 테스트, 워크플로우
