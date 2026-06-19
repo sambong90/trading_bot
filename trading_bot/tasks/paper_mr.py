@@ -25,6 +25,8 @@ from trading_bot.config import (
     PAPER_MR_ENABLED, PAPER_MR_TIMEFRAME, PAPER_MR_MA20_DEV, PAPER_MR_MA50_DEV,
     PAPER_MR_CRASH_PCT, PAPER_MR_CRASH_LOOKBACK, PAPER_MR_STOP_PCT, PAPER_MR_MAX_HOLD,
     PAPER_MR_FEE_PCT, PAPER_MR_SLIP_PCT, PAPER_MR_ORDER_KRW, PAPER_MR_COOLDOWN_BARS,
+    PAPER_MR_LIQ_TRAIL_BARS, PAPER_MR_LIQ_LO_KRW, PAPER_MR_LIQ_HI_KRW,
+    PAPER_MR_AGE_YOUNG_D, PAPER_MR_AGE_OLD_D,
 )
 
 logger = logging.getLogger('paper_mr')
@@ -137,6 +139,38 @@ def _orderbook_snapshot(ticker: str, order_krw: float) -> dict | None:
         return None
 
 
+def _liq_age(session, ticker: str, df, entry_ts):
+    """H002B 품질 버킷: 진입 직전 7일 거래대금(유동성) + 상장 경과일(연령) + 버킷."""
+    liq = bkt_l = age_days = bkt_a = None
+    try:
+        if 'volume' in df.columns:
+            tv = (df['close'] * df['volume']).to_numpy(dtype='float64')
+            tv = tv[np.isfinite(tv)]
+            if len(tv):
+                liq = float(np.median(tv[-PAPER_MR_LIQ_TRAIL_BARS:]))
+                bkt_l = 'lo' if liq < PAPER_MR_LIQ_LO_KRW else 'hi' if liq >= PAPER_MR_LIQ_HI_KRW else 'mid'
+    except Exception as e:
+        logger.warning('[paper_mr] %s 유동성 계산 실패: %s', ticker, e)
+    try:
+        from sqlalchemy import func
+        from trading_bot.models import OHLCV
+        mn = session.query(func.min(OHLCV.ts)).filter(
+            OHLCV.ticker == ticker, OHLCV.timeframe == PAPER_MR_TIMEFRAME).scalar()
+        if mn is not None:
+            mn = pd.Timestamp(mn); ets = pd.Timestamp(entry_ts)
+            if mn.tzinfo is None: mn = mn.tz_localize('UTC')
+            if ets.tzinfo is None: ets = ets.tz_localize('UTC')
+            age_days = float((ets - mn).total_seconds() / 86400.0)
+            bkt_a = 'young' if age_days < PAPER_MR_AGE_YOUNG_D else 'old' if age_days >= PAPER_MR_AGE_OLD_D else 'mid'
+    except Exception as e:
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        logger.warning('[paper_mr] %s 연령 계산 실패: %s', ticker, e)
+    return liq, bkt_l, age_days, bkt_a
+
+
 def _roi(entry_px: float, exit_px: float, entry_slip: float, exit_slip: float) -> float:
     buy = entry_px * (1.0 + entry_slip) * (1.0 + _FEE)
     sell = exit_px * (1.0 - exit_slip) * (1.0 - _FEE)
@@ -240,7 +274,7 @@ def _scan_entries(session, regime: str) -> int:
         try:
             if _has_block(session, ticker, now_utc):
                 continue
-            df = fetch_ohlcv(ticker=ticker, interval=PAPER_MR_TIMEFRAME, count=80, use_db_first=True)
+            df = fetch_ohlcv(ticker=ticker, interval=PAPER_MR_TIMEFRAME, count=200, use_db_first=True)
             if df is None or len(df) < 51:
                 continue
             df = _add_indicators(df)
@@ -273,6 +307,8 @@ def _scan_entries(session, regime: str) -> int:
             else:
                 note = '진입시 호가 스냅샷 실패'
 
+            liq, liq_bkt, age_days, age_bkt = _liq_age(session, ticker, df, entry_ts)
+
             pos = PaperMrPosition(
                 ticker=ticker, entry_ts=entry_ts, entry_signal=sig,
                 timeframe=PAPER_MR_TIMEFRAME, entry_close=entry_close,
@@ -286,16 +322,20 @@ def _scan_entries(session, regime: str) -> int:
                 ob_ask_depth_krw=round(depth, 0) if depth is not None else None,
                 entry_fill=entry_fill,
                 slippage_entry_pct=round(slippage_pct, 4) if slippage_pct is not None else None,
+                liq_turnover_krw=round(liq, 0) if liq is not None else None, liq_bucket=liq_bkt,
+                age_days=round(age_days, 1) if age_days is not None else None, age_bucket=age_bkt,
                 status='OPEN', note=note,
             )
             session.add(pos)
             session.commit()
             opened += 1
-            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%%',
+            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%% liq=%s/%s age=%s/%s',
                         ticker, sig, entry_close,
                         f'{dev20:.1f}' if dev20 is not None else 'na',
                         f'{slippage_pct:.3f}' if slippage_pct is not None else 'na',
-                        f'{spread:.3f}' if spread is not None else 'na')
+                        f'{spread:.3f}' if spread is not None else 'na',
+                        liq_bkt or 'na', f'{liq:.0f}' if liq is not None else 'na',
+                        age_bkt or 'na', f'{age_days:.0f}' if age_days is not None else 'na')
             # PAPER_SIGNAL 기록 (기존 연구모드 인프라 확장)
             try:
                 from trading_bot.ai_logger import log_ai_event
@@ -307,7 +347,9 @@ def _scan_entries(session, regime: str) -> int:
                            'dev20_pct': round(dev20, 2) if dev20 is not None else None,
                            'ret12_pct': round(ret12 * 100.0, 2) if ret12 is not None else None,
                            'slippage_entry_pct': round(slippage_pct, 4) if slippage_pct is not None else None,
-                           'spread_pct': round(spread, 4) if spread is not None else None},
+                           'spread_pct': round(spread, 4) if spread is not None else None,
+                           'liq_bucket': liq_bkt, 'age_bucket': age_bkt,
+                           'liq_turnover_krw': round(liq, 0) if liq is not None else None},
                 )
             except Exception as e:
                 logger.warning('[paper_mr] %s PAPER_SIGNAL 기록 실패: %s', ticker, e)

@@ -135,6 +135,13 @@ PAPER_MR_SLIP_PCT = float(os.environ.get('PAPER_MR_SLIP_PCT', '0.05'))   # 편�
 # 슬리피지 측정용 가상 주문 크기 (호가창 walk) — 실체결 추정
 PAPER_MR_ORDER_KRW = float(os.environ.get('PAPER_MR_ORDER_KRW', '100000'))
 PAPER_MR_COOLDOWN_BARS = int(os.environ.get('PAPER_MR_COOLDOWN_BARS', '1'))  # 청산 후 재진입 쿨다운
+# 유동성/연령 버킷 (H002B reports/H002B_SURVIVORSHIP.md: 엣지가 저유동 집중 → 실슬리피지 검증 핵심)
+# 유동성 = 진입 직전 7일(168봉) 시간당 KRW 거래대금 중앙값. 임계는 H002B ma20-5% 3분위.
+PAPER_MR_LIQ_TRAIL_BARS = int(os.environ.get('PAPER_MR_LIQ_TRAIL_BARS', '168'))
+PAPER_MR_LIQ_LO_KRW = float(os.environ.get('PAPER_MR_LIQ_LO_KRW', '62500000'))    # <이값=lo
+PAPER_MR_LIQ_HI_KRW = float(os.environ.get('PAPER_MR_LIQ_HI_KRW', '422700000'))   # >=이값=hi
+PAPER_MR_AGE_YOUNG_D = float(os.environ.get('PAPER_MR_AGE_YOUNG_D', '329'))       # <이값=young
+PAPER_MR_AGE_OLD_D = float(os.environ.get('PAPER_MR_AGE_OLD_D', '1107'))          # >=이값=old
 
 # ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
 # BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.

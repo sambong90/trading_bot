@@ -39,6 +39,11 @@ def _apply_migrations():
     _migrations = [
         # (table, column, SQL type)
         ('position_states', 'trailing_high', 'FLOAT DEFAULT 0.0'),
+        # H002B paper_mr 품질 버킷 (기존 paper_mr_positions 테이블에 컬럼 추가)
+        ('paper_mr_positions', 'liq_turnover_krw', 'FLOAT'),
+        ('paper_mr_positions', 'liq_bucket', 'VARCHAR(8)'),
+        ('paper_mr_positions', 'age_days', 'FLOAT'),
+        ('paper_mr_positions', 'age_bucket', 'VARCHAR(8)'),
     ]
     from sqlalchemy import text
     with engine.connect() as conn:

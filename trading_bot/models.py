@@ -287,6 +287,11 @@ class PaperMrPosition(Base):
     ob_ask_depth_krw = Column(Float)   # 매도호가 총 잔량 (KRW)
     entry_fill = Column(Float)         # PAPER_MR_ORDER_KRW 시장가 매수 체결추정가 (ask-walk)
     slippage_entry_pct = Column(Float) # (entry_fill/entry_close - 1) * 100 — 백테스트 가정 초과분
+    # H002B 품질 버킷 (저유동 엣지 vs 실슬리피지 분리 측정)
+    liq_turnover_krw = Column(Float)   # 진입 직전 7일 시간당 KRW 거래대금 중앙값 (유동성 프록시)
+    liq_bucket = Column(String(8))     # lo | mid | hi
+    age_days = Column(Float)           # 상장 경과일 (DB 최초봉 기준)
+    age_bucket = Column(String(8))     # young | mid | old
     # 가상 청산
     status = Column(String(8), nullable=False, default='OPEN')  # OPEN | CLOSED
     exit_ts = Column(DateTime(timezone=True))
