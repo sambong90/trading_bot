@@ -44,6 +44,11 @@ def _apply_migrations():
         ('paper_mr_positions', 'liq_bucket', 'VARCHAR(8)'),
         ('paper_mr_positions', 'age_days', 'FLOAT'),
         ('paper_mr_positions', 'age_bucket', 'VARCHAR(8)'),
+        # H002C 사이즈 로직
+        ('paper_mr_positions', 'max_fill_krw', 'FLOAT'),
+        ('paper_mr_positions', 'sized_order_krw', 'FLOAT'),
+        ('paper_mr_positions', 'sized_slippage_pct', 'FLOAT'),
+        ('paper_mr_positions', 'size_capped', 'BOOLEAN'),
     ]
     from sqlalchemy import text
     with engine.connect() as conn:

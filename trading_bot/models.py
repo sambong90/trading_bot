@@ -292,6 +292,11 @@ class PaperMrPosition(Base):
     liq_bucket = Column(String(8))     # lo | mid | hi
     age_days = Column(Float)           # 상장 경과일 (DB 최초봉 기준)
     age_bucket = Column(String(8))     # young | mid | old
+    # H002C 사이즈 로직 (호가깊이 대비 0.30% 내 체결 가능 사이즈로 제한 시 실슬리피지)
+    max_fill_krw = Column(Float)       # entry_close 대비 target_slip 내 체결 가능한 최대 KRW
+    sized_order_krw = Column(Float)    # min(의도주문, max_fill_krw) — 깊이에 맞춘 가상 주문크기
+    sized_slippage_pct = Column(Float) # 그 사이즈로 제한했을 때 실슬리피지 (의도크기 slippage_entry_pct와 비교)
+    size_capped = Column(Boolean)      # 호가가 의도주문을 target_slip 내 못 채워 축소됐나
     # 가상 청산
     status = Column(String(8), nullable=False, default='OPEN')  # OPEN | CLOSED
     exit_ts = Column(DateTime(timezone=True))

@@ -26,7 +26,7 @@ from trading_bot.config import (
     PAPER_MR_CRASH_PCT, PAPER_MR_CRASH_LOOKBACK, PAPER_MR_STOP_PCT, PAPER_MR_MAX_HOLD,
     PAPER_MR_FEE_PCT, PAPER_MR_SLIP_PCT, PAPER_MR_ORDER_KRW, PAPER_MR_COOLDOWN_BARS,
     PAPER_MR_LIQ_TRAIL_BARS, PAPER_MR_LIQ_LO_KRW, PAPER_MR_LIQ_HI_KRW,
-    PAPER_MR_AGE_YOUNG_D, PAPER_MR_AGE_OLD_D,
+    PAPER_MR_AGE_YOUNG_D, PAPER_MR_AGE_OLD_D, PAPER_MR_TARGET_SLIP_PCT,
 )
 
 logger = logging.getLogger('paper_mr')
@@ -93,8 +93,45 @@ def _btc_regime() -> str:
 
 
 # ── 호가창 스냅샷 (슬리피지 실측) ───────────────────────────────────────────────
-def _orderbook_snapshot(ticker: str, order_krw: float) -> dict | None:
-    """진입 직후 라이브 호가. ask-walk로 order_krw 시장가 매수 체결추정가 산출."""
+def _ask_walk(units, krw):
+    """매수 krw를 매도호가 위로 채운 VWAP 체결가. (vwap, filled_krw, partial)."""
+    remaining, cost, qty = krw, 0.0, 0.0
+    for u in units:
+        px = float(u['ask_price']); lvl = px * float(u['ask_size'])
+        take = min(remaining, lvl)
+        if take <= 0:
+            break
+        qty += take / px; cost += take; remaining -= take
+        if remaining <= 0:
+            break
+    return (cost / qty if qty > 0 else None), cost, (remaining > 0)
+
+
+def _max_within_slip(units, ref, target_slip):
+    """VWAP가 ref*(1+target_slip%) 이내인 최대 누적 KRW (호가깊이 흡수 한도). 0=touch가 이미 초과."""
+    cap = ref * (1.0 + target_slip / 100.0)
+    cum_krw = cum_qty = 0.0; maxk = 0.0
+    for u in units:
+        px = float(u['ask_price']); lvl = px * float(u['ask_size'])
+        if px > cap:                          # 이 레벨 가격이 이미 상한 초과
+            if cum_qty == 0:
+                return 0.0                    # 첫 호가부터 초과 → target 내 체결 불가
+            break
+        new_krw = cum_krw + lvl; new_qty = cum_qty + lvl / px
+        if new_krw / new_qty <= cap:
+            cum_krw, cum_qty, maxk = new_krw, new_qty, new_krw
+        else:                                  # 이 레벨 부분만 담으면 상한 도달
+            denom = 1.0 - cap / px
+            if denom > 0:
+                x = (cap * cum_qty - cum_krw) / denom
+                if x > 0:
+                    maxk = cum_krw + x
+            break
+    return maxk
+
+
+def _orderbook_snapshot(ticker: str, order_krw: float, ref_price: float, target_slip: float) -> dict | None:
+    """진입 직후 라이브 호가 + H002C 사이즈 로직(target_slip 내 체결 가능 사이즈)."""
     try:
         import pyupbit
         ob = pyupbit.get_orderbook(ticker)
@@ -116,23 +153,21 @@ def _orderbook_snapshot(ticker: str, order_krw: float) -> dict | None:
         mid = (ask1 + bid1) / 2.0
         spread_pct = (ask1 - bid1) / mid * 100.0
         ask_depth_krw = sum(float(u['ask_price']) * float(u['ask_size']) for u in units)
-        # ask-walk: order_krw를 매도호가 위로 채우며 평균 체결가
-        remaining, cost, qty = order_krw, 0.0, 0.0
-        for u in units:
-            lvl_krw = float(u['ask_price']) * float(u['ask_size'])
-            take = min(remaining, lvl_krw)
-            if take <= 0:
-                break
-            qty += take / float(u['ask_price'])
-            cost += take
-            remaining -= take
-            if remaining <= 0:
-                break
-        fill = (cost / qty) if qty > 0 else ask1
+        fill, _, partial = _ask_walk(units, order_krw)              # 의도주문(고정) 체결가
+        if fill is None:
+            fill = ask1
+        ref = ref_price if (ref_price and ref_price > 0) else ask1
+        max_fill_krw = _max_within_slip(units, ref, target_slip)    # target_slip 내 흡수 한도
+        sized_order = min(order_krw, max_fill_krw)                  # 깊이에 맞춘 사이즈
+        sized_fill, _, _ = _ask_walk(units, sized_order) if sized_order > 0 else (None, 0, True)
         return {
             'ask1': ask1, 'bid1': bid1, 'spread_pct': spread_pct,
             'ask_depth_krw': ask_depth_krw, 'fill': fill,
-            'partial': remaining > 0,  # 호가창이 주문크기를 못 채움(저유동)
+            'partial': partial,                       # 호가창이 의도주문을 못 채움(저유동)
+            'max_fill_krw': max_fill_krw,
+            'sized_order_krw': sized_order,
+            'sized_fill': sized_fill,
+            'size_capped': max_fill_krw < order_krw,
         }
     except Exception as e:
         logger.warning('[paper_mr] %s 호가 파싱 실패: %s', ticker, e)
@@ -294,16 +329,24 @@ def _scan_entries(session, regime: str) -> int:
             ret12 = float(row['ret12']) if np.isfinite(row['ret12']) else None
             dev20 = (entry_close / ma20 - 1.0) * 100.0 if ma20 else None
 
-            ob = _orderbook_snapshot(ticker, PAPER_MR_ORDER_KRW)
+            ob = _orderbook_snapshot(ticker, PAPER_MR_ORDER_KRW, entry_close, PAPER_MR_TARGET_SLIP_PCT)
             entry_fill = slippage_pct = ask1 = bid1 = spread = depth = None
+            max_fill_krw = sized_order = sized_slip = size_capped = None
             note = None
             if ob:
                 ask1, bid1 = ob['ask1'], ob['bid1']
                 spread, depth = ob['spread_pct'], ob['ask_depth_krw']
                 entry_fill = ob['fill']
                 slippage_pct = (entry_fill / entry_close - 1.0) * 100.0
-                if ob['partial']:
-                    note = '호가창이 가상주문 크기 미충족(저유동)'
+                max_fill_krw = ob['max_fill_krw']
+                sized_order = ob['sized_order_krw']
+                size_capped = ob['size_capped']
+                if ob['sized_fill'] is not None:
+                    sized_slip = (ob['sized_fill'] / entry_close - 1.0) * 100.0
+                if max_fill_krw <= 0:
+                    note = '호가 첫단부터 target_slip 초과(target 내 체결 불가)'
+                elif ob['partial']:
+                    note = '호가창이 의도주문 크기 미충족(저유동)'
             else:
                 note = '진입시 호가 스냅샷 실패'
 
@@ -324,18 +367,24 @@ def _scan_entries(session, regime: str) -> int:
                 slippage_entry_pct=round(slippage_pct, 4) if slippage_pct is not None else None,
                 liq_turnover_krw=round(liq, 0) if liq is not None else None, liq_bucket=liq_bkt,
                 age_days=round(age_days, 1) if age_days is not None else None, age_bucket=age_bkt,
+                max_fill_krw=round(max_fill_krw, 0) if max_fill_krw is not None else None,
+                sized_order_krw=round(sized_order, 0) if sized_order is not None else None,
+                sized_slippage_pct=round(sized_slip, 4) if sized_slip is not None else None,
+                size_capped=size_capped,
                 status='OPEN', note=note,
             )
             session.add(pos)
             session.commit()
             opened += 1
-            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%% liq=%s/%s age=%s/%s',
+            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%% liq=%s age=%s sized=%s/%s capped=%s',
                         ticker, sig, entry_close,
                         f'{dev20:.1f}' if dev20 is not None else 'na',
                         f'{slippage_pct:.3f}' if slippage_pct is not None else 'na',
                         f'{spread:.3f}' if spread is not None else 'na',
-                        liq_bkt or 'na', f'{liq:.0f}' if liq is not None else 'na',
-                        age_bkt or 'na', f'{age_days:.0f}' if age_days is not None else 'na')
+                        liq_bkt or 'na', age_bkt or 'na',
+                        f'{sized_order:.0f}' if sized_order is not None else 'na',
+                        f'{sized_slip:.3f}%' if sized_slip is not None else 'na',
+                        size_capped)
             # PAPER_SIGNAL 기록 (기존 연구모드 인프라 확장)
             try:
                 from trading_bot.ai_logger import log_ai_event
@@ -349,7 +398,10 @@ def _scan_entries(session, regime: str) -> int:
                            'slippage_entry_pct': round(slippage_pct, 4) if slippage_pct is not None else None,
                            'spread_pct': round(spread, 4) if spread is not None else None,
                            'liq_bucket': liq_bkt, 'age_bucket': age_bkt,
-                           'liq_turnover_krw': round(liq, 0) if liq is not None else None},
+                           'liq_turnover_krw': round(liq, 0) if liq is not None else None,
+                           'sized_order_krw': round(sized_order, 0) if sized_order is not None else None,
+                           'sized_slippage_pct': round(sized_slip, 4) if sized_slip is not None else None,
+                           'size_capped': size_capped},
                 )
             except Exception as e:
                 logger.warning('[paper_mr] %s PAPER_SIGNAL 기록 실패: %s', ticker, e)

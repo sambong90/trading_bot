@@ -142,6 +142,8 @@ PAPER_MR_LIQ_LO_KRW = float(os.environ.get('PAPER_MR_LIQ_LO_KRW', '62500000'))  
 PAPER_MR_LIQ_HI_KRW = float(os.environ.get('PAPER_MR_LIQ_HI_KRW', '422700000'))   # >=이값=hi
 PAPER_MR_AGE_YOUNG_D = float(os.environ.get('PAPER_MR_AGE_YOUNG_D', '329'))       # <이값=young
 PAPER_MR_AGE_OLD_D = float(os.environ.get('PAPER_MR_AGE_OLD_D', '1107'))          # >=이값=old
+# H002C 사이즈 로직: 호가깊이 대비 0.30% 내 체결 가능한 최대 사이즈로 주문 제한 (저유동 통제 검증)
+PAPER_MR_TARGET_SLIP_PCT = float(os.environ.get('PAPER_MR_TARGET_SLIP_PCT', '0.30'))  # 사이즈 산정 슬리피지 상한
 
 # ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
 # BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.
