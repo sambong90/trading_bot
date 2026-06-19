@@ -113,6 +113,29 @@ def is_new_buy_enabled() -> bool:
         pass
     return NEW_BUY_ENABLED
 
+
+# ── H002 깊은이격 평균회귀 페이퍼 검증 (연구 — 실주문 없음) ────────────────────
+# 백테스트 엣지(quant-research reports/H002_MEANREVERSION.md: 1h, PF 1.27~1.46)를
+# 실시간 가상체결로 검증. 슬리피지(급락 저유동 코인 실호가)·생존편향·OOS>IS 확인이 목적.
+# 실주문 절대 없음: PaperMrPosition 테이블 + PAPER_SIGNAL ai_event 기록만.
+PAPER_MR_ENABLED = os.environ.get('PAPER_MR_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')
+PAPER_MR_TIMEFRAME = os.environ.get('PAPER_MR_TIMEFRAME', 'minute60')  # 1h 특이 엣지
+# 진입 트리거 (백테스트 통과분만 — 얕은 과매도 RSI/BB 단독 금지)
+PAPER_MR_MA20_DEV = float(os.environ.get('PAPER_MR_MA20_DEV', '5.0'))    # close < ma20*(1-5%)
+PAPER_MR_MA50_DEV = float(os.environ.get('PAPER_MR_MA50_DEV', '10.0'))   # close < ma50*(1-10%)
+PAPER_MR_CRASH_PCT = float(os.environ.get('PAPER_MR_CRASH_PCT', '15.0')) # 12봉 수익률 < -15%
+PAPER_MR_CRASH_LOOKBACK = int(os.environ.get('PAPER_MR_CRASH_LOOKBACK', '12'))
+# 청산 (MR 전용: MA20 복귀 익절 / stop / 시간) — 추세 트레일 재탕 금지
+PAPER_MR_STOP_PCT = float(os.environ.get('PAPER_MR_STOP_PCT', '-10.0'))
+PAPER_MR_MAX_HOLD = int(os.environ.get('PAPER_MR_MAX_HOLD', '48'))       # 1h봉 48 = 2일
+PAPER_MR_TP_TARGET = os.environ.get('PAPER_MR_TP_TARGET', 'ma20')        # 평균(ma20) 복귀
+# 비용 가정 (백테스트와 동일 — roi_signal 비교 기준)
+PAPER_MR_FEE_PCT = float(os.environ.get('PAPER_MR_FEE_PCT', '0.05'))     # 편도 %
+PAPER_MR_SLIP_PCT = float(os.environ.get('PAPER_MR_SLIP_PCT', '0.05'))   # 편도 % (백테스트 가정)
+# 슬리피지 측정용 가상 주문 크기 (호가창 walk) — 실체결 추정
+PAPER_MR_ORDER_KRW = float(os.environ.get('PAPER_MR_ORDER_KRW', '100000'))
+PAPER_MR_COOLDOWN_BARS = int(os.environ.get('PAPER_MR_COOLDOWN_BARS', '1'))  # 청산 후 재진입 쿨다운
+
 # ── DYN_THR 장세별 차등 임계값 (GuardianResult.regime 기반) ────────────────
 # BULL에서는 패턴 확인 수준을 완화해 기회 포착, BEAR에서는 강한 패턴만 허용.
 DYN_THR_BY_REGIME: dict = {

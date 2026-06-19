@@ -581,6 +581,18 @@ def run_daily_briefing() -> None:
         _log(f'[스케줄러] daily_briefing 실패: {e}', 'warning')
 
 
+def run_paper_mr() -> None:
+    """H002 깊은이격 평균회귀 페이퍼 스캔 — 1h봉 마감 후. 연구(실주문 없음).
+
+    run_scan은 내부에서 모든 예외를 흡수하므로 스케줄러 코어에 영향 없음.
+    """
+    try:
+        from trading_bot.tasks.paper_mr import run_scan
+        run_scan()
+    except Exception as e:
+        _log(f'[스케줄러] paper_mr 실패(영향 없음): {e}', 'warning')
+
+
 def run_market_briefing() -> None:
     """Periodic Market Briefing: BTC 추세, 계좌·ROI, 24h P&L, ADX 상위 3 -> Telegram."""
     # 파드 재시작 시 동일 시간대 중복 발송 방지: DB에 발송 이력 원자적 기록
@@ -766,6 +778,14 @@ if os.environ.get('OHLCV_COLLECT_ENABLED', '1').strip().lower() in ('1', 'true',
                   'cron', minute=3, id='collect_60m_full',
                   max_instances=1, misfire_grace_time=300)
     _log('1h 전 종목 보완 수집 스케줄 등록 (매시 03분)')
+
+    # H002 깊은이격 평균회귀 페이퍼 스캔: 1h봉 전 종목 수집(매시 03분) 직후 04분.
+    # 연구(실주문 없음). PAPER_MR_ENABLED=0으로 비활성.
+    from trading_bot.config import PAPER_MR_ENABLED
+    if PAPER_MR_ENABLED:
+        sched.add_job(run_paper_mr, 'cron', minute=4, id='paper_mr',
+                      max_instances=1, misfire_grace_time=300)
+        _log('H002 평균회귀 페이퍼 스캔 스케줄 등록 (매시 04분 — 연구, 실주문 없음)')
 
     # 일/주/월봉: 1일 1회 (일봉 마감 09:00 KST 직후). 주·월봉은 단일 호출로 장기 백필.
     sched.add_job(lambda: _collect_ohlcv_bulk('day', DAY_OHLCV_COUNT, 'day'),

@@ -255,6 +255,51 @@ class AiEvent(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class PaperMrPosition(Base):
+    """H002 깊은이격 평균회귀 페이퍼 가상 포지션 (연구 — 실주문 없음).
+
+    백테스트 엣지(quant-research reports/H002_MEANREVERSION.md)를 실시간 검증.
+    핵심: roi_signal_pct(백테스트 가정 비용) vs roi_realistic_pct(실측 진입 슬리피지)
+    비교로 슬리피지가 엣지(+0.66~1.76%)를 잠식하는지 판정. 테이블은 create_all() 자동 생성.
+    """
+    __tablename__ = 'paper_mr_positions'
+    __table_args__ = (
+        Index('idx_paper_mr_status', 'status'),
+        Index('idx_paper_mr_ticker_entry', 'ticker', 'entry_ts'),
+    )
+    id = Column(Integer, primary_key=True)
+    ticker = Column(String(32), nullable=False)
+    entry_ts = Column(DateTime(timezone=True), nullable=False)   # 신호 발생 봉 마감 시각
+    entry_signal = Column(String(16))                            # ma20_dev | ma50_dev | crash
+    timeframe = Column(String(16))
+    entry_close = Column(Float)        # 신호봉 종가 (= 백테스트 진입가 가정)
+    # 진입 시점 지표
+    rsi = Column(Float)
+    dev20_pct = Column(Float)          # (close/ma20 - 1) * 100
+    ma20 = Column(Float)
+    ma50 = Column(Float)
+    ret12_pct = Column(Float)          # 직전 12봉 수익률 %
+    regime = Column(String(16))        # 진입 시 BTC 일봉 추세 (bull/sideways/bear)
+    # 슬리피지 측정 (진입 직후 라이브 호가 스냅샷)
+    entry_ask1 = Column(Float)         # 매도 1호가 (시장가 매수 첫 체결)
+    entry_bid1 = Column(Float)         # 매수 1호가
+    spread_pct = Column(Float)         # (ask1-bid1)/mid * 100
+    ob_ask_depth_krw = Column(Float)   # 매도호가 총 잔량 (KRW)
+    entry_fill = Column(Float)         # PAPER_MR_ORDER_KRW 시장가 매수 체결추정가 (ask-walk)
+    slippage_entry_pct = Column(Float) # (entry_fill/entry_close - 1) * 100 — 백테스트 가정 초과분
+    # 가상 청산
+    status = Column(String(8), nullable=False, default='OPEN')  # OPEN | CLOSED
+    exit_ts = Column(DateTime(timezone=True))
+    exit_reason = Column(String(8))    # TP | STOP | TIME
+    exit_close = Column(Float)
+    hold_bars = Column(Integer)
+    roi_signal_pct = Column(Float)     # 백테스트 등가: 진입종가→청산가, fee+slip 가정 차감
+    roi_realistic_pct = Column(Float)  # 실측 진입체결(ask-walk)→청산가, 진입 슬리피지 반영
+    note = Column(Text)                # 생존편향 관찰 (상폐/거래정지 등)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class MacroSnapshot(Base):
     """거시 지표 일봉 스냅샷 — L1 글로벌 필터(G-01~G-15) 평가용.
 
