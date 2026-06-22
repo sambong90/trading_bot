@@ -49,6 +49,9 @@ def _apply_migrations():
         ('paper_mr_positions', 'sized_order_krw', 'FLOAT'),
         ('paper_mr_positions', 'sized_slippage_pct', 'FLOAT'),
         ('paper_mr_positions', 'size_capped', 'BOOLEAN'),
+        # 자본배분 틸트 (tilt.weight(regime, dd_30d))
+        ('paper_mr_positions', 'dd_30d', 'FLOAT'),
+        ('paper_mr_positions', 'tilt_w', 'FLOAT'),
     ]
     from sqlalchemy import text
     with engine.connect() as conn:

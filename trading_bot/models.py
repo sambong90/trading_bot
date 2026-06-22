@@ -297,6 +297,9 @@ class PaperMrPosition(Base):
     sized_order_krw = Column(Float)    # min(의도주문, max_fill_krw) — 깊이에 맞춘 가상 주문크기
     sized_slippage_pct = Column(Float) # 그 사이즈로 제한했을 때 실슬리피지 (의도크기 slippage_entry_pct와 비교)
     size_capped = Column(Boolean)      # 호가가 의도주문을 target_slip 내 못 채워 축소됐나
+    # 자본배분 틸트 (엔진 무수정, 주문크기만 — tilt.weight(regime, dd_30d))
+    dd_30d = Column(Float)             # 30일 고점 대비 위치(%) = (close/30d_high - 1)*100
+    tilt_w = Column(Float)             # w_regime × w_dd, sized_order에 곱해진 자본가중
     # 가상 청산
     status = Column(String(8), nullable=False, default='OPEN')  # OPEN | CLOSED
     exit_ts = Column(DateTime(timezone=True))

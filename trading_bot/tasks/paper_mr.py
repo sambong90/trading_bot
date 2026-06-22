@@ -28,6 +28,7 @@ from trading_bot.config import (
     PAPER_MR_LIQ_TRAIL_BARS, PAPER_MR_LIQ_LO_KRW, PAPER_MR_LIQ_HI_KRW,
     PAPER_MR_AGE_YOUNG_D, PAPER_MR_AGE_OLD_D, PAPER_MR_TARGET_SLIP_PCT,
 )
+from trading_bot import tilt as _tilt   # 자본배분 틸트 w(regime, dd_30d) — backtester/tilt.py와 동일 정의
 
 logger = logging.getLogger('paper_mr')
 
@@ -309,7 +310,7 @@ def _scan_entries(session, regime: str) -> int:
         try:
             if _has_block(session, ticker, now_utc):
                 continue
-            df = fetch_ohlcv(ticker=ticker, interval=PAPER_MR_TIMEFRAME, count=200, use_db_first=True)
+            df = fetch_ohlcv(ticker=ticker, interval=PAPER_MR_TIMEFRAME, count=760, use_db_first=True)  # 760=dd_30d(720봉=30일)용; ma20/50·ret12(롤링)·signal은 최신봉 값 불변
             if df is None or len(df) < 51:
                 continue
             df = _add_indicators(df)
@@ -328,8 +329,15 @@ def _scan_entries(session, regime: str) -> int:
             rsi = float(row['rsi']) if np.isfinite(row['rsi']) else None
             ret12 = float(row['ret12']) if np.isfinite(row['ret12']) else None
             dev20 = (entry_close / ma20 - 1.0) * 100.0 if ma20 else None
+            # dd_30d(30일 고점 대비 위치) + 자본배분 틸트 w (엔진 무수정 — 주문크기에만 곱)
+            dd30 = None
+            if 'high' in df.columns:
+                h30 = df['high'].rolling(720, min_periods=24).max().iloc[-1]
+                if np.isfinite(h30) and float(h30) > 0:
+                    dd30 = (entry_close / float(h30) - 1.0) * 100.0
+            tilt_w = _tilt.weight(regime, dd30)
 
-            ob = _orderbook_snapshot(ticker, PAPER_MR_ORDER_KRW, entry_close, PAPER_MR_TARGET_SLIP_PCT)
+            ob = _orderbook_snapshot(ticker, PAPER_MR_ORDER_KRW * tilt_w, entry_close, PAPER_MR_TARGET_SLIP_PCT)
             entry_fill = slippage_pct = ask1 = bid1 = spread = depth = None
             max_fill_krw = sized_order = sized_slip = size_capped = None
             note = None
@@ -371,17 +379,20 @@ def _scan_entries(session, regime: str) -> int:
                 sized_order_krw=round(sized_order, 0) if sized_order is not None else None,
                 sized_slippage_pct=round(sized_slip, 4) if sized_slip is not None else None,
                 size_capped=size_capped,
+                dd_30d=round(dd30, 2) if dd30 is not None else None,
+                tilt_w=round(tilt_w, 3),
                 status='OPEN', note=note,
             )
             session.add(pos)
             session.commit()
             opened += 1
-            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%% liq=%s age=%s sized=%s/%s capped=%s',
+            logger.info('[paper_mr] OPEN %s %s close=%.4g dev20=%s slip=%s%% spread=%s%% liq=%s age=%s dd=%s w=%.2f sized=%s/%s capped=%s',
                         ticker, sig, entry_close,
                         f'{dev20:.1f}' if dev20 is not None else 'na',
                         f'{slippage_pct:.3f}' if slippage_pct is not None else 'na',
                         f'{spread:.3f}' if spread is not None else 'na',
                         liq_bkt or 'na', age_bkt or 'na',
+                        f'{dd30:.1f}' if dd30 is not None else 'na', tilt_w,
                         f'{sized_order:.0f}' if sized_order is not None else 'na',
                         f'{sized_slip:.3f}%' if sized_slip is not None else 'na',
                         size_capped)
@@ -401,7 +412,8 @@ def _scan_entries(session, regime: str) -> int:
                            'liq_turnover_krw': round(liq, 0) if liq is not None else None,
                            'sized_order_krw': round(sized_order, 0) if sized_order is not None else None,
                            'sized_slippage_pct': round(sized_slip, 4) if sized_slip is not None else None,
-                           'size_capped': size_capped},
+                           'size_capped': size_capped,
+                           'dd_30d': round(dd30, 2) if dd30 is not None else None, 'tilt_w': round(tilt_w, 3)},
                 )
             except Exception as e:
                 logger.warning('[paper_mr] %s PAPER_SIGNAL 기록 실패: %s', ticker, e)
